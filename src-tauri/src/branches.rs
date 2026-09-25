@@ -157,6 +157,48 @@ pub fn validate_name(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+pub fn local_name(full_ref: &str) -> Result<&str, AppError> {
+    let name = full_ref
+        .strip_prefix("refs/heads/")
+        .ok_or_else(|| AppError::new("invalid_branch", "Choose a local branch."))?;
+    validate_name(name)?;
+    Ok(name)
+}
+
+pub async fn rename_local(
+    git: &GitRunner,
+    repository: &Path,
+    full_ref: &str,
+    new_name: &str,
+) -> Result<Duration, AppError> {
+    let old_name = local_name(full_ref)?;
+    validate_name(new_name)?;
+    let output = git
+        .run(repository, &["branch", "-m", "--", old_name, new_name])
+        .await
+        .map_err(AppError::from)?;
+    if !output.success() {
+        return Err(git_failure(&output));
+    }
+    Ok(output.duration)
+}
+
+pub async fn delete_local(
+    git: &GitRunner,
+    repository: &Path,
+    full_ref: &str,
+) -> Result<Duration, AppError> {
+    let name = local_name(full_ref)?;
+    let output = git
+        .run(repository, &["branch", "-d", "--", name])
+        .await
+        .map_err(AppError::from)?;
+    if !output.success() {
+        return Err(git_failure(&output));
+    }
+    Ok(output.duration)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

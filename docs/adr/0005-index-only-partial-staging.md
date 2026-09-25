@@ -1,0 +1,11 @@
+# ADR 0005: Index-only partial staging
+
+Status: accepted for M12.
+
+Woo keeps the M5 structured diff as the sole display model. A diff carries a SHA-256 fingerprint of its bounded raw Git patch and a flag indicating whether its file metadata permits text partial staging. React sends only that fingerprint, a hunk position, and optional changed-line positions. Under the existing repository mutation mutex, Rust checks Git-owned operation/conflict state, re-reads the targeted patch, compares the complete fingerprint, and builds one patch from Git's file headers and the selected hunk. An index-only `git apply --cached` stages it; `git apply --cached --reverse` unstages it. Patch input travels over stdin. Woo never rewrites the working file for partial staging.
+
+Line selection is limited to one hunk per operation. Selected additions/deletions remain changes; on stage, unselected deletions become context and unselected additions are omitted. On unstage, unselected additions become context and unselected deletions are omitted. Within a contiguous replacement block, old and new line positions are paired so the selected replacement does not move around an unrelated old/new line. Context, exact whitespace, and no-newline markers are retained as required. Git's normal context matching and atomic apply remain the final authority. Woo does not use `--reject`, `--3way`, or zero-context application.
+
+Only modified tracked UTF-8 text with ordinary patch metadata is eligible. New, deleted, renamed, copied, mode-changing, gitlink, binary, untracked, and unresolved-conflict entries retain whole-file or conflict-specific actions. This conservative boundary avoids accidental mode/ref staging. A full-patch fingerprint makes any intervening change invalidate the selection. After an apply attempt, Rust returns refreshed status and both targeted file diffs, including when Git returns a nonzero exit. A failed status refresh requires a manual repository refresh. External Git/filesystem races between re-read and `git apply` cannot be made atomic without controlling all writers; Git context matching prevents most stale applications and an apply refusal preserves the index.
+
+See [Git apply](https://git-scm.com/docs/git-apply) for cached, reverse, and patch-application semantics.

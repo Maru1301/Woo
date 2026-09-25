@@ -5,6 +5,7 @@ use crate::{
     working_tree::valid_relative_path,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
     path::Path,
     time::{Duration, Instant},
@@ -49,6 +50,8 @@ pub struct DiffFile {
     pub change: FileChange,
     pub is_binary: bool,
     pub hunks: Vec<DiffHunk>,
+    pub revision: String,
+    pub partial_stageable: bool,
 }
 
 #[derive(Debug)]
@@ -105,6 +108,8 @@ pub fn parse_patch(bytes: &[u8], change: FileChange) -> Result<DiffFile, AppErro
         change,
         is_binary: false,
         hunks: Vec::new(),
+        revision: format!("{:x}", Sha256::digest(bytes)),
+        partial_stageable: true,
     };
     let mut headers = 0;
     let mut old_next = 0u32;
@@ -123,7 +128,23 @@ pub fn parse_patch(bytes: &[u8], change: FileChange) -> Result<DiffFile, AppErro
         }
         if line.starts_with("Binary files ") || line == "GIT binary patch" {
             file.is_binary = true;
+            file.partial_stageable = false;
             continue;
+        }
+        if line.starts_with("old mode ")
+            || line.starts_with("new mode ")
+            || line.starts_with("new file mode ")
+            || line.starts_with("deleted file mode ")
+            || line.starts_with("rename from ")
+            || line.starts_with("rename to ")
+            || line.starts_with("copy from ")
+            || line.starts_with("copy to ")
+            || line.starts_with("index ")
+                && line
+                    .rsplit_once(' ')
+                    .is_some_and(|(_, mode)| mode != "100644" && mode != "100755")
+        {
+            file.partial_stageable = false;
         }
         if file.is_binary {
             continue;
@@ -211,6 +232,9 @@ pub fn parse_patch(bytes: &[u8], change: FileChange) -> Result<DiffFile, AppErro
             return Err(malformed());
         }
     }
+    file.partial_stageable &= !file.hunks.is_empty()
+        && file.change.kind == ChangeKind::Modified
+        && file.change.old_path.is_none();
     Ok(file)
 }
 
@@ -309,19 +333,32 @@ pub async fn load_working_diff(
     change: FileChange,
 ) -> Result<(DiffFile, DiffTiming), AppError> {
     let started = Instant::now();
+    let output = load_working_patch(git, repository, staged, untracked, &change).await?;
+    parse_output(output, change, started).await
+}
+
+pub async fn load_working_patch(
+    git: &GitRunner,
+    repository: &Path,
+    staged: bool,
+    untracked: bool,
+    change: &FileChange,
+) -> Result<GitOutput, AppError> {
     if !repository.is_dir() {
         return Err(AppError::new(
             "repository_missing",
             "The open repository directory no longer exists.",
         ));
     }
-    let selected_paths = paths(&change)?;
+    let selected_paths = paths(change)?;
     let mut args = vec![
         "--literal-pathspecs",
         "diff",
         "--no-ext-diff",
         "--no-textconv",
         "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
         "--find-renames",
         "--unified=3",
     ];
@@ -343,7 +380,7 @@ pub async fn load_working_diff(
     if !output.success() && !(untracked && output.exit_code == Some(1)) {
         return Err(git_failure(&output));
     }
-    parse_output(output, change, started).await
+    Ok(output)
 }
 
 pub async fn load_commit_files(
@@ -487,6 +524,28 @@ mod tests {
                 .unwrap_err()
                 .code,
             "invalid_git_output"
+        );
+    }
+
+    #[test]
+    fn mode_and_gitlink_changes_are_not_partial_stageable() {
+        let mode = b"diff --git a/a b/a\nold mode 100644\nnew mode 100755\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+        assert!(
+            !parse_patch(mode, change(ChangeKind::Modified))
+                .unwrap()
+                .partial_stageable
+        );
+        let gitlink = b"diff --git a/sub b/sub\nindex 123..456 160000\n--- a/sub\n+++ b/sub\n@@ -1 +1 @@\n-Subproject commit 123\n+Subproject commit 456\n";
+        assert!(
+            !parse_patch(gitlink, change(ChangeKind::Modified))
+                .unwrap()
+                .partial_stageable
+        );
+        let symlink = b"diff --git a/link b/link\nindex 123..456 120000\n--- a/link\n+++ b/link\n@@ -1 +1 @@\n-old\n+new\n";
+        assert!(
+            !parse_patch(symlink, change(ChangeKind::Modified))
+                .unwrap()
+                .partial_stageable
         );
     }
 

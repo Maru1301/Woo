@@ -1,108 +1,91 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import HistoryPanel from "./HistoryPanel";
 import RemotePanel from "./RemotePanel";
-import BranchPanel, { type BranchState } from "./BranchPanel";
+import BranchPanel from "./BranchPanel";
+import StashPanel from "./StashPanel";
+import TagPanel from "./TagPanel";
+import MergePanel from "./MergePanel";
 import DiffViewer, { type DiffSource } from "./DiffViewer";
+import { useRepositorySession } from "./app/repository-session/useRepositorySession";
+import { FileGroup } from "./features/changes/FileGroup";
+import { WorkspaceLayout, type WorkspaceView } from "./layout/WorkspaceLayout";
 import {
-  checkoutBranch, commitStaged, createBranch, errorCode, getBranches, getRepositoryStatus, messageForError, openRepository, stageAll, stageFile,
-  unstageAll, unstageFile, type FileChange, type RemoteRefresh, type RepositoryInfo, type RepositoryStatus,
+  checkoutBranch, commitStaged, createBranch, deleteBranch, errorCode, getBranches, getRepositoryState, messageForError, openRepository, partialStage, renameBranch, stageAll, stageFile,
+  cherryPick, resetTo, revertCommit, unstageAll, unstageFile, type ConflictMutationResult, type FileChange, type HistoryMutationResult, type MergeMutationResult, type PartialSelection, type PartialStageResult, type RemoteRefresh, type RepositoryState, type RepositoryStatus, type ResetMode, type StashMutationResult,
 } from "./lib/repository";
-
-type StatusState =
-  | { phase: "idle" | "loading"; data: null }
-  | { phase: "ready"; data: RepositoryStatus }
-  | { phase: "error"; data: null; message: string };
-
-const ROW_HEIGHT = 44;
-
-function FileGroup({ title, files, action, onAction, onSelect, busy }: {
-  title: string;
-  files: FileChange[];
-  action?: string;
-  onAction?: (change: FileChange) => void;
-  onSelect?: (change: FileChange) => void;
-  busy: boolean;
-}) {
-  const [scrollTop, setScrollTop] = useState(0);
-  const height = Math.min(280, Math.max(44, files.length * ROW_HEIGHT));
-  const start = Math.min(
-    Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - 4),
-    Math.max(0, files.length - Math.ceil(height / ROW_HEIGHT)),
-  );
-  const end = Math.min(files.length, start + Math.ceil(height / ROW_HEIGHT) + 8);
-  return <section className="file-group" aria-label={title}>
-    <h3>{title}<span>{files.length}</span></h3>
-    {files.length === 0 ? <p className="empty-group">No files</p> : <div className="file-scroll" style={{ height }} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
-      <div className="file-spacer" style={{ height: files.length * ROW_HEIGHT }}>
-        {files.slice(start, end).map((file, index) => <div className="file-row" style={{ top: (start + index) * ROW_HEIGHT }} key={`${file.path}:${index}`}>
-          <span className={`change-kind kind-${file.kind}`}>{file.kind.replace("_", " ")}</span>
-          {onSelect ? <button className="file-select file-path" disabled={busy} title={`View diff for ${file.path}`} onClick={() => onSelect(file)}>{file.oldPath && <span className="old-path">{file.oldPath} → </span>}{file.path}</button> : <span className="file-path" title={file.path}>{file.path}</span>}
-          {action && onAction && <button className="row-action" disabled={busy} onClick={() => onAction(file)}>{action}</button>}
-        </div>)}
-      </div>
-    </div>}
-  </section>;
-}
 
 export default function App() {
   const [path, setPath] = useState("");
-  const [repository, setRepository] = useState<RepositoryInfo | null>(null);
+  const [activeView, setActiveView] = useState<WorkspaceView>("history");
+  const [showOpen, setShowOpen] = useState(true);
+  const [session, dispatchSession] = useRepositorySession();
+  const { repository, status, branches, operation, conflicts } = session;
   const [openError, setOpenError] = useState("");
-  const [status, setStatus] = useState<StatusState>({ phase: "idle", data: null });
+  const [conflictVersion, setConflictVersion] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
   const [commitError, setCommitError] = useState("");
   const [commitNotice, setCommitNotice] = useState("");
   const [selectedChange, setSelectedChange] = useState<{ source: DiffSource; change: FileChange } | null>(null);
-  const [branches, setBranches] = useState<BranchState>({ phase: "idle", data: null });
   const [branchError, setBranchError] = useState("");
   const [historyVersion, setHistoryVersion] = useState(0);
   const [historyRefreshVersion, setHistoryRefreshVersion] = useState(0);
+  const [historyActionError, setHistoryActionError] = useState("");
+  const [historyActionNotice, setHistoryActionNotice] = useState("");
   const [remoteBusy, setRemoteBusy] = useState(false);
+  const [managementBusy, setManagementBusy] = useState(false);
+  const managementBusyRef = useRef(0);
   const [sessionVersion, setSessionVersion] = useState(0);
   const branchRequest = useRef(0);
   const busyRef = useRef(false);
 
+  function applyRepositoryState(state: RepositoryState) {
+    dispatchSession({ type: "repositoryState", state });
+    setConflictVersion((value) => value + 1);
+  }
+
   async function loadBranches() {
     const request = ++branchRequest.current;
     setBranchError("");
-    setBranches({ phase: "loading", data: null });
+    dispatchSession({ type: "branchesLoading" });
     try {
       const data = await getBranches();
-      if (request === branchRequest.current) setBranches({ phase: "ready", data });
+      if (request === branchRequest.current) dispatchSession({ type: "branchesReady", branches: data });
     } catch (cause) {
-      if (request === branchRequest.current) setBranches({ phase: "error", data: null, message: messageForError(cause) });
+      if (request === branchRequest.current) dispatchSession({ type: "branchesError", message: messageForError(cause) });
     }
   }
 
   async function loadRepository(selectedPath: string) {
-    if (!selectedPath.trim() || busyRef.current) return;
+    if (!selectedPath.trim() || busyRef.current || managementBusyRef.current > 0 || remoteBusy) return;
     busyRef.current = true;
     setBusy("Opening repository");
     setOpenError("");
-    setRepository(null);
+    dispatchSession({ type: "reset" });
     setRemoteBusy(false);
+    setManagementBusy(false);
     branchRequest.current += 1;
-    setBranches({ phase: "idle", data: null });
     setBranchError("");
-    setStatus({ phase: "idle", data: null });
     setSelectedChange(null);
     setCommitMessage("");
     setCommitError("");
     setCommitNotice("");
+    setHistoryActionError(""); setHistoryActionNotice("");
     try {
       const info = await openRepository(selectedPath.trim());
-      setRepository(info);
+      dispatchSession({ type: "opened", repository: info });
+      setShowOpen(false);
+      setActiveView("history");
       setSessionVersion((value) => value + 1);
       setHistoryVersion((value) => value + 1);
       void loadBranches();
       setPath(info.path);
-      setStatus({ phase: "loading", data: null });
+      dispatchSession({ type: "statusLoading" });
       try {
-        setStatus({ phase: "ready", data: await getRepositoryStatus() });
+        applyRepositoryState(await getRepositoryState());
       } catch (cause) {
-        setStatus({ phase: "error", data: null, message: messageForError(cause) });
+        dispatchSession({ type: "statusError", message: messageForError(cause) });
       }
     } catch (cause) {
       setOpenError(messageForError(cause));
@@ -113,7 +96,7 @@ export default function App() {
   }
 
   async function chooseRepository() {
-    if (busyRef.current) return;
+    if (busyRef.current || managementBusyRef.current > 0 || remoteBusy) return;
     try {
       const selected = await open({ directory: true, multiple: false, title: "Open Git repository" });
       if (selected) {
@@ -126,15 +109,15 @@ export default function App() {
   }
 
   async function refresh() {
-    if (busyRef.current || remoteBusy || !repository) return;
+    if (busyRef.current || managementBusyRef.current > 0 || remoteBusy || !repository) return;
     busyRef.current = true;
     setBusy("Refreshing changes");
-    setStatus({ phase: "loading", data: null });
+    dispatchSession({ type: "statusLoading" });
     setSelectedChange(null);
     try {
-      setStatus({ phase: "ready", data: await getRepositoryStatus() });
+      applyRepositoryState(await getRepositoryState());
     } catch (cause) {
-      setStatus({ phase: "error", data: null, message: messageForError(cause) });
+      dispatchSession({ type: "statusError", message: messageForError(cause), clearOperation: true });
     } finally {
       busyRef.current = false;
       setBusy(null);
@@ -142,24 +125,38 @@ export default function App() {
   }
 
   async function changeIndex(label: string, operation: () => Promise<RepositoryStatus>) {
-    if (busyRef.current || remoteBusy || !repository) return;
+    if (busyRef.current || managementBusyRef.current > 0 || remoteBusy || !repository || mergeActive || conflicts.length > 0) return;
     busyRef.current = true;
     setBusy(label);
     setSelectedChange(null);
     setCommitNotice("");
     try {
-      setStatus({ phase: "ready", data: await operation() });
+      dispatchSession({ type: "statusReady", status: await operation() });
       setCommitError("");
     } catch (cause) {
-      setStatus({ phase: "error", data: null, message: messageForError(cause) });
+      dispatchSession({ type: "statusError", message: messageForError(cause) });
     } finally {
       busyRef.current = false;
       setBusy(null);
     }
   }
 
+  async function changePart(source: "staged" | "unstaged", change: FileChange, selection: PartialSelection): Promise<PartialStageResult> {
+    if (busyRef.current || managementBusyRef.current > 0 || remoteBusy || !repository || mergeActive || conflicts.length > 0) throw new Error("Another repository operation is running.");
+    busyRef.current = true;
+    setBusy(source === "staged" ? "Unstaging selected changes" : "Staging selected changes");
+    try {
+      const result = await partialStage(change.path, source === "staged", selection);
+      dispatchSession({ type: "statusReady", status: result.status });
+      return result;
+    } catch (cause) {
+      dispatchSession({ type: "statusError", message: "Changes may have changed. Refresh to continue." });
+      throw cause;
+    } finally { busyRef.current = false; setBusy(null); }
+  }
+
   async function commit() {
-    if (busyRef.current || remoteBusy || !repository) return;
+    if (busyRef.current || managementBusyRef.current > 0 || remoteBusy || !repository || mergeActive || conflicts.length > 0) return;
     if (!commitMessage.trim()) {
       setCommitError("Enter a commit message.");
       return;
@@ -179,23 +176,19 @@ export default function App() {
     setCommitNotice("");
     try {
       const result = await commitStaged(commitMessage);
-      setRepository((current) => current ? { ...current, head: result.head } : current);
       branchRequest.current += 1;
-      if (branches.phase === "ready") {
-        setBranches({ phase: "ready", data: { branches: branches.data.branches.map((branch) => branch.isCurrent ? { ...branch, targetHash: result.head.hash } : branch) } });
-      } else {
-        void loadBranches();
-      }
+      dispatchSession({ type: "commit", result });
+      if (branches.phase !== "ready") void loadBranches();
       setHistoryVersion((value) => value + 1);
-      setStatus({ phase: "ready", data: result.status });
       setCommitMessage("");
       setCommitNotice(`Committed ${result.head.hash.slice(0, 10)}.`);
     } catch (cause) {
       const message = messageForError(cause);
       setCommitError(message);
-      setStatus({ phase: "error", data: null, message: "Changes may have changed. Refresh to continue." });
+      dispatchSession({ type: "statusError", message: "Changes may have changed. Refresh to continue." });
       if (errorCode(cause) === "commit_refresh_failed") {
-        setRepository(null);
+        branchRequest.current += 1;
+        dispatchSession({ type: "reset" });
         setOpenError(message);
       }
     } finally {
@@ -205,17 +198,17 @@ export default function App() {
   }
 
   async function createLocalBranch(name: string): Promise<boolean> {
-    if (busyRef.current || remoteBusy || !repository) return false;
+    if (busyRef.current || managementBusyRef.current > 0 || remoteBusy || !repository || mergeActive || conflicts.length > 0) return false;
     busyRef.current = true;
     setBusy(`Creating ${name}`);
     setBranchError("");
     branchRequest.current += 1;
     try {
-      setBranches({ phase: "ready", data: await createBranch(name) });
+      dispatchSession({ type: "branchesReady", branches: await createBranch(name) });
       return true;
     } catch (cause) {
       setBranchError(messageForError(cause));
-      if (errorCode(cause) === "branch_refresh_failed") setBranches({ phase: "error", data: null, message: "Branch list is out of date. Retry to refresh." });
+      if (errorCode(cause) === "branch_refresh_failed") dispatchSession({ type: "branchesError", message: "Branch list is out of date. Retry to refresh." });
       return false;
     } finally {
       busyRef.current = false;
@@ -224,16 +217,14 @@ export default function App() {
   }
 
   async function switchBranch(name: string) {
-    if (busyRef.current || remoteBusy || !repository) return;
+    if (busyRef.current || managementBusyRef.current > 0 || remoteBusy || !repository || mergeActive || conflicts.length > 0) return;
     busyRef.current = true;
     setBusy(`Switching to ${name}`);
     setBranchError("");
     branchRequest.current += 1;
     try {
       const result = await checkoutBranch(name);
-      setRepository((current) => current ? { ...current, branch: result.branch, head: result.head } : current);
-      setBranches({ phase: "ready", data: result.branches });
-      setStatus({ phase: "ready", data: result.status });
+      dispatchSession({ type: "checkout", result });
       setSelectedChange(null);
       setHistoryVersion((value) => value + 1);
       setCommitNotice("");
@@ -242,9 +233,8 @@ export default function App() {
       const message = messageForError(cause);
       setBranchError(message);
       if (errorCode(cause) === "checkout_refresh_failed") {
-        setRepository(null);
-        setStatus({ phase: "idle", data: null });
-        setBranches({ phase: "idle", data: null });
+        branchRequest.current += 1;
+        dispatchSession({ type: "reset" });
         setSelectedChange(null);
         setOpenError("Branch switched, but its updated state could not be loaded. Reopen the repository.");
       }
@@ -254,27 +244,110 @@ export default function App() {
     }
   }
 
+  async function changeBranchRef(label: string, operation: () => Promise<import("./lib/repository").BranchRefMutationResult>): Promise<boolean> {
+    if (busyRef.current || managementBusyRef.current > 0 || remoteBusy || !repository || mergeActive || conflicts.length > 0) return false;
+    busyRef.current = true;
+    setBusy(label);
+    setBranchError("");
+    branchRequest.current += 1;
+    try {
+      const result = await operation();
+      dispatchSession({ type: "branchRefs", result });
+      setHistoryRefreshVersion((value) => value + 1);
+      return true;
+    } catch (cause) {
+      setBranchError(messageForError(cause));
+      if (errorCode(cause) === "branch_refresh_failed") inconsistentManagement("Branch refs changed, but updated state could not be loaded.");
+      return false;
+    } finally {
+      busyRef.current = false;
+      setBusy(null);
+    }
+  }
+
+  function applyStashMutation(result: StashMutationResult) {
+    dispatchSession({ type: "stash", result });
+    if (result.conflicts) setConflictVersion((value) => value + 1);
+    if (result.clearDiff) setSelectedChange(null);
+    if (result.resetHistory) setHistoryVersion((value) => value + 1);
+  }
+
+  function inconsistentManagement(message: string) {
+    branchRequest.current += 1;
+    dispatchSession({ type: "reset" });
+    setSelectedChange(null);
+    setOpenError(`${message} Reopen the repository.`);
+  }
+
+  function managementBusyChanged(value: boolean) {
+    managementBusyRef.current = Math.max(0, managementBusyRef.current + (value ? 1 : -1));
+    setManagementBusy(managementBusyRef.current > 0);
+  }
+
   function applyRemoteRefresh(result: RemoteRefresh) {
     branchRequest.current += 1;
-    setBranches({ phase: "ready", data: result.branches });
-    if (result.head) {
-      const currentBranch = result.branches.branches.find((branch) => branch.isCurrent)?.name ?? null;
-      setRepository((current) => current ? { ...current, branch: currentBranch, head: result.head } : current);
-    }
-    if (result.status) setStatus({ phase: "ready", data: result.status });
+    dispatchSession({ type: "remote", result });
+    if (result.conflicts) setConflictVersion((value) => value + 1);
     if (result.clearDiff) setSelectedChange(null);
     if (result.resetHistory) setHistoryVersion((value) => value + 1);
     else if (result.refreshHistory) setHistoryRefreshVersion((value) => value + 1);
   }
 
+  function applyMergeResult(result: MergeMutationResult) {
+    branchRequest.current += 1;
+    dispatchSession({ type: "historyMutation", result });
+    setConflictVersion((value) => value + 1);
+    if (result.clearDiff) setSelectedChange(null);
+    if (result.resetHistory) setHistoryVersion((value) => value + 1);
+    setCommitNotice("");
+    setCommitError("");
+  }
+
+  function applyHistoryResult(result: HistoryMutationResult) {
+    branchRequest.current += 1;
+    dispatchSession({ type: "historyMutation", result });
+    setConflictVersion((value) => value + 1);
+    if (result.clearDiff) setSelectedChange(null);
+    if (result.resetHistory) setHistoryVersion((value) => value + 1);
+    setCommitNotice(""); setCommitError("");
+  }
+
+  async function runSelectedCommitAction(action: "cherry_pick" | "revert" | "reset", commit: string, mode?: ResetMode): Promise<void> {
+    if (busyRef.current || managementBusyRef.current > 0 || remoteBusy || !repository || operation.kind !== "none" || conflicts.length > 0) return;
+    busyRef.current = true;
+    setHistoryActionError(""); setHistoryActionNotice("");
+    setBusy(action === "reset" ? `Resetting (${mode})` : action === "revert" ? "Reverting commit" : "Cherry-picking commit");
+    try {
+      const result = action === "cherry_pick" ? await cherryPick(commit) : action === "revert" ? await revertCommit(commit) : await resetTo(commit, mode!);
+      applyHistoryResult(result);
+      if (result.error) throw result.error;
+      setHistoryActionNotice(result.state.operation.kind === "none" ? `${action === "reset" ? "Reset" : action === "revert" ? "Revert" : "Cherry-pick"} complete.` : "Operation stopped. Resolve and stage conflicts above.");
+    } catch (cause) {
+      setHistoryActionError(messageForError(cause));
+      if (errorCode(cause) === "merge_refresh_failed") inconsistentManagement("Git ran, but updated state could not be loaded.");
+      throw cause;
+    } finally { busyRef.current = false; setBusy(null); }
+  }
+
+  function applyConflictResult(result: ConflictMutationResult) {
+    applyRepositoryState(result.state);
+    setSelectedChange(null);
+  }
+
   const changes = status.phase === "ready" ? status.data : null;
+  const mergeActive = operation.kind !== "none";
+  const repositoryMutationDisabled = mergeActive || conflicts.length > 0;
   const hasStageable = !!changes && changes.unstaged.length + changes.untracked.length + changes.conflicted.length > 0;
   const hasStaged = !!changes && changes.staged.length > 0;
-  const controlsBusy = !!busy || remoteBusy;
+  const controlsBusy = !!busy || remoteBusy || managementBusy;
+  const changeCount = changes ? changes.staged.length + changes.unstaged.length + changes.untracked.length + changes.conflicted.length : 0;
 
-  return <main className="app-shell">
-    <header className="topbar"><div className="brand"><span className="brand-mark">W</span><span>Woo</span></div><span className="milestone">Remotes</span></header>
-    <section className="workspace">
+  useEffect(() => {
+    if (repository && operation.kind !== "none") setActiveView("manage");
+  }, [repository, operation.kind]);
+
+  return <WorkspaceLayout repository={repository} activeView={activeView} onViewChange={(view) => { setShowOpen(false); setActiveView(view); }} onOpen={() => setShowOpen(true)} openDisabled={controlsBusy} changeCount={changeCount} busy={busy} remoteControls={repository && <RemotePanel key={`${repository.path}:${sessionVersion}`} onComplete={applyRemoteRefresh} onInconsistent={inconsistentManagement} onBusyChange={setRemoteBusy} localBusy={!!busy || managementBusy || repositoryMutationDisabled} />} sidebar={repository && <BranchPanel compact state={branches} currentBranch={repository.branch} busy={controlsBusy || repositoryMutationDisabled} onCreate={createLocalBranch} onCheckout={(name) => void switchBranch(name)} onRename={(ref, name) => changeBranchRef(`Renaming ${ref}`, () => renameBranch(ref, name))} onDelete={(ref) => changeBranchRef(`Deleting ${ref}`, () => deleteBranch(ref))} onRetry={() => void loadBranches()} error={branchError} />}>
+    {(!repository || showOpen) && <div className="woo-open-view">
       <div className="intro"><p className="eyebrow">YOUR WORKSPACE</p><h1>Open a repository</h1><p>Inspect changes and prepare files for your next commit.</p></div>
       <div className="open-panel">
         <label htmlFor="repo-path">Repository path</label>
@@ -285,7 +358,10 @@ export default function App() {
         </div>
         {openError && <p className="error" role="alert">{openError}</p>}
       </div>
+      {repository && <button className="secondary woo-open-close" onClick={() => setShowOpen(false)}>Return to workspace</button>}
+    </div>}
       {repository && <>
+        <div className="woo-view woo-manage-view" hidden={showOpen || activeView !== "manage"}>
         <section className="repo-card" aria-label="Repository information">
           <div className="repo-heading"><span className="repo-icon">⌘</span><div><p className="eyebrow">REPOSITORY</p><h2>{repository.path.split(/[\\/]/).filter(Boolean).at(-1)}</h2></div></div>
           <dl>
@@ -294,35 +370,44 @@ export default function App() {
             <div><dt>HEAD</dt><dd>{repository.head ? <><code>{repository.head.hash.slice(0, 10)}</code><span className="subject">{repository.head.subject}</span></> : "No commits yet"}</dd></div>
           </dl>
         </section>
-        <RemotePanel key={`${repository.path}:${sessionVersion}`} onComplete={applyRemoteRefresh} onInconsistent={(message) => { setRepository(null); setStatus({ phase: "idle", data: null }); setOpenError(`${message} Reopen the repository.`); }} onBusyChange={setRemoteBusy} localBusy={!!busy} />
-        <BranchPanel state={branches} currentBranch={repository.branch} busy={controlsBusy} onCreate={createLocalBranch} onCheckout={(name) => void switchBranch(name)} onRetry={() => void loadBranches()} error={branchError} />
-        <section className="changes-panel" aria-label="Working tree changes">
+        <BranchPanel state={branches} currentBranch={repository.branch} busy={controlsBusy || repositoryMutationDisabled} onCreate={createLocalBranch} onCheckout={(name) => void switchBranch(name)} onRename={(ref, name) => changeBranchRef(`Renaming ${ref}`, () => renameBranch(ref, name))} onDelete={(ref) => changeBranchRef(`Deleting ${ref}`, () => deleteBranch(ref))} onRetry={() => void loadBranches()} error={branchError} />
+        <MergePanel key={`merge:${repository.path}:${sessionVersion}`} branches={branches.phase === "ready" ? branches.data.branches : []} operation={operation} conflicts={conflicts} busy={controlsBusy || status.phase !== "ready"} refreshToken={conflictVersion} onBusyChange={managementBusyChanged} onMerge={applyMergeResult} onHistory={applyHistoryResult} onConflict={applyConflictResult} onInconsistent={inconsistentManagement} />
+        <StashPanel key={`stash:${repository.path}:${sessionVersion}`} busy={controlsBusy || repositoryMutationDisabled} onBusyChange={managementBusyChanged} onMutation={applyStashMutation} onInconsistent={inconsistentManagement} />
+        <TagPanel key={`tag:${repository.path}:${sessionVersion}`} busy={controlsBusy || repositoryMutationDisabled} onBusyChange={managementBusyChanged} onMutation={() => setHistoryRefreshVersion((value) => value + 1)} onInconsistent={inconsistentManagement} />
+        </div>
+        <section className="changes-panel woo-view" aria-label="Working tree changes" hidden={showOpen || activeView !== "changes"}>
+          <div className="woo-changes-list">
           <div className="changes-heading"><div><p className="eyebrow">WORKING TREE</p><h2>Changes</h2></div><div className="change-actions">
             <button className="secondary" disabled={controlsBusy} onClick={() => void refresh()}>Refresh</button>
-            <button className="secondary" disabled={controlsBusy || !hasStaged} onClick={() => void changeIndex("Unstaging all", unstageAll)}>Unstage All</button>
-            <button disabled={controlsBusy || !hasStageable} onClick={() => void changeIndex("Staging all", stageAll)}>Stage All</button>
+            <button className="secondary" disabled={controlsBusy || repositoryMutationDisabled || !hasStaged} onClick={() => void changeIndex("Unstaging all", unstageAll)}>Unstage All</button>
+            <button disabled={controlsBusy || repositoryMutationDisabled || !hasStageable} onClick={() => void changeIndex("Staging all", stageAll)}>Stage All</button>
           </div></div>
           {busy && <p className="operation-feedback" role="status">{busy}…</p>}
           {status.phase === "loading" && <p className="status-placeholder">Loading changes…</p>}
           {status.phase === "error" && <p className="error" role="alert">{status.message}</p>}
           {changes && <div className="change-groups">
-            <FileGroup title="Staged" files={changes.staged} action="Unstage" onSelect={(file) => setSelectedChange({ source: "staged", change: file })} onAction={(file) => void changeIndex(`Unstaging ${file.path}`, () => unstageFile(file))} busy={controlsBusy} />
-            <FileGroup title="Unstaged" files={changes.unstaged} action="Stage" onSelect={(file) => setSelectedChange({ source: "unstaged", change: file })} onAction={(file) => void changeIndex(`Staging ${file.path}`, () => stageFile(file))} busy={controlsBusy} />
-            <FileGroup title="Untracked" files={changes.untracked} action="Stage" onSelect={(file) => setSelectedChange({ source: "untracked", change: file })} onAction={(file) => void changeIndex(`Staging ${file.path}`, () => stageFile(file))} busy={controlsBusy} />
-            {changes.conflicted.length > 0 && <FileGroup title="Conflicted" files={changes.conflicted} action="Stage" onAction={(file) => void changeIndex(`Staging ${file.path}`, () => stageFile(file))} busy={controlsBusy} />}
+            <FileGroup title="Staged" files={changes.staged} action="Unstage" onSelect={(file) => setSelectedChange({ source: "staged", change: file })} onAction={(file) => void changeIndex(`Unstaging ${file.path}`, () => unstageFile(file))} busy={controlsBusy || repositoryMutationDisabled} />
+            <FileGroup title="Unstaged" files={changes.unstaged} action="Stage" onSelect={(file) => setSelectedChange({ source: "unstaged", change: file })} onAction={(file) => void changeIndex(`Staging ${file.path}`, () => stageFile(file))} busy={controlsBusy || repositoryMutationDisabled} />
+            <FileGroup title="Untracked" files={changes.untracked} action="Stage" onSelect={(file) => setSelectedChange({ source: "untracked", change: file })} onAction={(file) => void changeIndex(`Staging ${file.path}`, () => stageFile(file))} busy={controlsBusy || repositoryMutationDisabled} />
+            {changes.conflicted.length > 0 && <FileGroup title="Conflicted" files={changes.conflicted} busy={controlsBusy || repositoryMutationDisabled} />}
           </div>}
-          {selectedChange && changes && <DiffViewer key={`${selectedChange.source}:${selectedChange.change.path}:${selectedChange.change.oldPath ?? ""}`} source={selectedChange.source} change={selectedChange.change} />}
           <div className="commit-area">
             <div><h3>Commit staged changes</h3><p>Only files in Staged are included in this commit.</p></div>
             <label htmlFor="commit-message">Commit message</label>
-            <textarea id="commit-message" value={commitMessage} disabled={controlsBusy} rows={4} placeholder="Describe your change" onChange={(event) => { setCommitMessage(event.target.value); setCommitError(""); setCommitNotice(""); }} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void commit(); } }} />
-            <div className="commit-footer"><span>{!hasStaged ? "Stage a change to enable commit." : "Ctrl+Enter to commit"}</span><button disabled={controlsBusy || !hasStaged || status.phase !== "ready"} onClick={() => void commit()}>{busy === "Committing staged changes" ? "Committing…" : "Commit"}</button></div>
+            <textarea id="commit-message" value={commitMessage} disabled={controlsBusy || repositoryMutationDisabled} rows={4} placeholder="Describe your change" onChange={(event) => { setCommitMessage(event.target.value); setCommitError(""); setCommitNotice(""); }} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void commit(); } }} />
+            <div className="commit-footer"><span>{repositoryMutationDisabled ? "Finish the current repository operation above." : !hasStaged ? "Stage a change to enable commit." : "Ctrl+Enter to commit"}</span><button disabled={controlsBusy || repositoryMutationDisabled || !hasStaged || status.phase !== "ready"} onClick={() => void commit()}>{busy === "Committing staged changes" ? "Committing…" : "Commit"}</button></div>
             {commitError && <p className="error" role="alert">{commitError}</p>}
             {commitNotice && <p className="commit-notice" role="status">{commitNotice}</p>}
           </div>
+          </div>
+          <div className="woo-changes-detail">
+            {selectedChange && changes ? <DiffViewer key={`${selectedChange.source}:${selectedChange.change.path}:${selectedChange.change.oldPath ?? ""}`} source={selectedChange.source} change={selectedChange.change} busy={controlsBusy || repositoryMutationDisabled} onPartial={selectedChange.source === "staged" || selectedChange.source === "unstaged" ? (selection) => changePart(selectedChange.source as "staged" | "unstaged", selectedChange.change, selection) : undefined} /> : <p className="woo-detail-empty">Select a changed file to view its diff.</p>}
+          </div>
         </section>
-        <HistoryPanel key={`${repository.path}:${historyVersion}`} refreshToken={historyRefreshVersion} />
+        <div className="woo-view woo-history-view" hidden={showOpen || activeView !== "history"}>
+          {historyActionError && <p className="error" role="alert">{historyActionError}</p>}{historyActionNotice && <p className="commit-notice" role="status">{historyActionNotice}</p>}
+          <HistoryPanel key={`${repository.path}:${historyVersion}`} refreshToken={historyRefreshVersion} actionBusy={controlsBusy || repositoryMutationDisabled} onAction={runSelectedCommitAction} />
+        </div>
       </>}
-    </section>
-  </main>;
+  </WorkspaceLayout>;
 }

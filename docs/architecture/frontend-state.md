@@ -1,0 +1,14 @@
+# Frontend state boundaries
+
+The frontend keeps Git-owned repository facts separate from interaction state. `src/lib/repository.ts` remains the semantic Tauri API; React does not parse Git output.
+
+| State | Current owner | Examples |
+| --- | --- | --- |
+| Repository session | `src/app/repository-session/useRepositorySession.ts` | Open repository and HEAD, status, branches, active operation, conflicts |
+| View | `App.tsx` and the relevant feature panel | Selected working-tree diff, selected history commit, active detail, refresh tokens |
+| Layout | `src/layout/WorkspaceLayout.tsx` and `src/layout/workspace.css` | Detail position and size preset; both affect presentation only |
+| Transient UI | The component that displays it | Dialogs, notices, pending confirmation, local form text, busy feedback |
+
+Repository session updates use semantic reducer actions. A Git mutation result can update related repository facts in one transition. The shell still coordinates asynchronous operations and invalidates selected views explicitly. Feature panels keep local interaction state until a concrete cross-panel need calls for lifting it.
+
+The workspace now follows the local HTML prototype's toolbar, repository tab, sidebar, and split history/changes views. The tab represents the one repository Woo actually opens; the prototype's sample workspace and extra tabs are not application state. The next refactor increments should extract feature-specific orchestration from `App.tsx` one workflow at a time.

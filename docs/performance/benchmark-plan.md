@@ -99,3 +99,28 @@ The largest continuation token was 2,049 bytes for the 50-branch case. Layout di
 ## M8 local remote diagnostic, 2026-09-25
 
 Temporary bare remote and two local clones exercise fetch, pull, and push without network variability. A representative Windows debug integration run measured fetch Git 255 ms plus branch refresh 40 ms, pull Git 350 ms plus HEAD/status/branch refresh 142 ms, and push Git 343 ms plus branch refresh 49 ms. The fetch test measured 397 ms wall time including configured-remote validation, scheduling, and polling. Fetch has one validation Git process, one fetch process, and one branch refresh process; pull uses four processes including three targeted refreshes; push uses two. These are diagnostic samples, not network throughput benchmarks or Tauri/WebView responsiveness measurements. The process runner bounds captured stdout to 64 KiB and stderr to 256 KiB. No change was made to the M4 history, M5 diff, M6 branch, or M7 graph performance baselines.
+
+## M9 local refs and stash diagnostics, 2026-09-25
+
+`cargo run --example bench_m9` creates a temporary repository, adds tag refs using one `git update-ref --stdin` process per size, and samples bulk tag/stash listing three times in a Windows debug build. Values below are the median-total sample. Fixture creation is excluded.
+
+| Collection | Count | Git process | Rust parse | Total |
+| --- | ---: | ---: | ---: | ---: |
+| Tags | 20 | 41.320 ms | 0.037 ms | 41.369 ms |
+| Tags | 200 | 89.607 ms | 0.288 ms | 89.905 ms |
+| Tags | 1,000 | 180.374 ms | 0.879 ms | 181.266 ms |
+| Stashes | 10 | 58.223 ms | 0.033 ms | 58.279 ms |
+
+Both lists use one Git process, with no per-ref/stash subprocesses. Git/process/filesystem time dominates Rust parsing. These are local diagnostics with visible filesystem variation, not GUI frame times or Fork comparisons. Tag rows are virtualized; native WebView interaction remains unmeasured.
+
+## M10 conflict diagnostics, 2026-09-25
+
+A generated Windows debug fixture produced 11 text conflicts, including one 300 KiB file. `merge_branch` logged Git merge 110 ms and post-operation refresh 198 ms for that sample. A subsequent `get_repository_state` snapshot (status, merge marker, unmerged index metadata) took 104 ms. Full content was not loaded for the list; selecting the 300 KiB file returned semantic oversized flags under the 256 KiB per-side cap. These are single local diagnostics, not stable latency targets. There is one bulk `ls-files -u -z` process for conflicted index metadata, no Git process per rendered line; individual selected sides load on demand. Git/process/filesystem cost dominates parser work, but separate parsing timing was not recorded. Native WebView conflict-editor responsiveness remains unmeasured.
+
+## M11 history-operation diagnostics, 2026-09-25
+
+M11 adds no history or graph work to a repository-state refresh. Each history mutation runs one Git action under the existing session mutex and refreshes HEAD, branches, status, and operation markers once. An unmerged-index query runs only if status reports conflicts. Conflict blob content remains on demand. Hard reset adds bounded non-index and target-tree path-list queries to protect untracked and ignored collisions; those queries have 8 MiB output limits and may conservatively refuse very large repositories. Diagnostic timing is recorded in `docs/handoff.md`; local filesystem and process startup variation dominate short operations. No network or native WebView frame measurements were added.
+
+## M12 partial-staging diagnostic, 2026-09-25
+
+One Windows debug integration run of small temporary files logged approximately 40–60 ms for `git apply` and 110–170 ms for the targeted status and staged/unstaged file-diff refresh. This is a diagnostic range across individual tests, not a benchmark distribution. One semantic action applies all selected lines in its hunk with one Git apply process; it does not invoke Git per line. The existing 2 MiB raw patch and 20,000 parsed-line limits remain. Native WebView line-selection and scrolling times were not measured; the UI/UX phase should measure them before changing rendering strategy.

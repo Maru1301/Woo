@@ -157,3 +157,85 @@ async fn invalid_names_do_not_run_git() {
         "invalid_branch_name"
     );
 }
+
+#[tokio::test]
+async fn rename_current_and_noncurrent_branch_and_reject_collisions() {
+    let dir = fixture();
+    let tree = open(&dir).await;
+    let current = tree
+        .rename_branch("refs/heads/main", "trunk")
+        .await
+        .unwrap();
+    assert_eq!(current.branch.as_deref(), Some("trunk"));
+    assert_eq!(git(dir.path(), &["branch", "--show-current"]), "trunk");
+    tree.create_branch("feature/a").await.unwrap();
+    let renamed = tree
+        .rename_branch("refs/heads/feature/a", "feature/b")
+        .await
+        .unwrap();
+    assert!(renamed
+        .branches
+        .branches
+        .iter()
+        .any(|branch| branch.name == "feature/b"));
+    assert!(!renamed
+        .branches
+        .branches
+        .iter()
+        .any(|branch| branch.name == "feature/a"));
+    assert_eq!(
+        tree.rename_branch("refs/heads/feature/b", "trunk")
+            .await
+            .unwrap_err()
+            .code,
+        "git_failed"
+    );
+    assert_eq!(
+        tree.rename_branch("refs/remotes/origin/main", "x")
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_branch"
+    );
+    assert_eq!(
+        tree.rename_branch("refs/heads/trunk", "bad name")
+            .await
+            .unwrap_err()
+            .code,
+        "git_failed"
+    );
+}
+
+#[tokio::test]
+async fn safe_delete_refuses_current_and_unmerged_branches() {
+    let dir = fixture();
+    let tree = open(&dir).await;
+    tree.create_branch("merged").await.unwrap();
+    let deleted = tree.delete_branch("refs/heads/merged").await.unwrap();
+    assert!(!deleted
+        .branches
+        .branches
+        .iter()
+        .any(|branch| branch.name == "merged"));
+    assert_eq!(
+        tree.delete_branch("refs/heads/main")
+            .await
+            .unwrap_err()
+            .code,
+        "git_failed"
+    );
+    git(dir.path(), &["switch", "-c", "unmerged"]);
+    fs::write(dir.path().join("other.txt"), "new\n").unwrap();
+    git(dir.path(), &["add", "other.txt"]);
+    git(dir.path(), &["commit", "-m", "Unmerged"]);
+    git(dir.path(), &["switch", "main"]);
+    let error = tree.delete_branch("refs/heads/unmerged").await.unwrap_err();
+    assert_eq!(error.code, "git_failed");
+    assert!(tree
+        .branches()
+        .await
+        .unwrap()
+        .branches
+        .iter()
+        .any(|branch| branch.name == "unmerged"));
+}

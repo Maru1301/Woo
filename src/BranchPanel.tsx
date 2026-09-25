@@ -1,15 +1,16 @@
 import { useState } from "react";
 import type { BranchInfo, BranchList } from "./lib/repository";
+import type { LoadState } from "./app/repository-session/useRepositorySession";
 
-export type BranchState =
-  | { phase: "idle" | "loading"; data: null }
-  | { phase: "ready"; data: BranchList }
-  | { phase: "error"; data: null; message: string };
+export type BranchState = LoadState<BranchList>;
 
 const ROW_HEIGHT = 42;
 
-function BranchGroup({ title, branches, busy, onCheckout }: { title: string; branches: BranchInfo[]; busy: boolean; onCheckout?: (name: string) => void }) {
+function BranchGroup({ title, branches, busy, onCheckout, onRename, onDelete }: { title: string; branches: BranchInfo[]; busy: boolean; onCheckout?: (name: string) => void; onRename?: (ref: string, name: string) => Promise<boolean>; onDelete?: (ref: string) => Promise<boolean> }) {
   const [scrollTop, setScrollTop] = useState(0);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [newName, setNewName] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const height = Math.min(252, Math.max(42, branches.length * ROW_HEIGHT));
   const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - 3);
   const end = Math.min(branches.length, start + Math.ceil(height / ROW_HEIGHT) + 6);
@@ -19,38 +20,43 @@ function BranchGroup({ title, branches, busy, onCheckout }: { title: string; bra
       <div className="branch-spacer" style={{ height: branches.length * ROW_HEIGHT }}>
         {branches.slice(start, end).map((branch, index) => <div className={`branch-row ${branch.isCurrent ? "current" : ""}`} style={{ top: (start + index) * ROW_HEIGHT }} key={branch.fullRefName}>
           <span className="branch-indicator" aria-label={branch.isCurrent ? "Current branch" : undefined}>{branch.isCurrent ? "●" : ""}</span>
-          <span className="branch-name" title={branch.fullRefName}>{branch.name}</span>
+          {editing === branch.fullRefName ? <form className="branch-inline-form" onSubmit={(event) => { event.preventDefault(); if (newName.trim() && onRename) void onRename(branch.fullRefName, newName.trim()).then((ok) => { if (ok) setEditing(null); }); }}><input aria-label={`New name for ${branch.name}`} value={newName} onChange={(event) => setNewName(event.target.value)} disabled={busy} autoFocus /><button disabled={busy || !newName.trim()}>Save</button><button type="button" className="secondary" onClick={() => setEditing(null)}>Cancel</button></form> : <span className="branch-name" title={branch.fullRefName}>{branch.name}</span>}
           <code title={branch.targetHash}>{branch.targetHash.slice(0, 8)}</code>
           {branch.upstream && <span className="branch-upstream" title={`Upstream: ${branch.upstream}`}>↗ {branch.upstream}</span>}
           {onCheckout && !branch.isCurrent && <button className="secondary" disabled={busy} onClick={() => onCheckout(branch.name)}>Switch</button>}
+          {onRename && editing !== branch.fullRefName && <button className="secondary" disabled={busy} onClick={() => { setEditing(branch.fullRefName); setNewName(branch.name); setConfirmDelete(null); }}>Rename</button>}
+          {onDelete && !branch.isCurrent && <button className="secondary" disabled={busy} onClick={() => { if (confirmDelete === branch.fullRefName) void onDelete(branch.fullRefName).then((ok) => { if (ok) setConfirmDelete(null); }); else setConfirmDelete(branch.fullRefName); }}>{confirmDelete === branch.fullRefName ? "Confirm delete" : "Delete"}</button>}
         </div>)}
       </div>
     </div>}
   </div>;
 }
 
-export default function BranchPanel({ state, currentBranch, busy, onCreate, onCheckout, onRetry, error }: {
+export default function BranchPanel({ state, currentBranch, busy, onCreate, onCheckout, onRename, onDelete, onRetry, error, compact = false }: {
   state: BranchState;
   currentBranch: string | null;
   busy: boolean;
   onCreate: (name: string) => Promise<boolean>;
   onCheckout: (name: string) => void;
+  onRename: (ref: string, name: string) => Promise<boolean>;
+  onDelete: (ref: string) => Promise<boolean>;
   onRetry: () => void;
   error: string;
+  compact?: boolean;
 }) {
   const [name, setName] = useState("");
   const branches = state.phase === "ready" ? state.data.branches : [];
-  return <section className="branches-panel" aria-label="Branches">
+  return <section className={`branches-panel ${compact ? "compact" : ""}`} aria-label="Branches">
     <div className="branches-heading"><div><p className="eyebrow">REFS</p><h2>Branches</h2></div><span className="branch-current">{currentBranch ? `Current: ${currentBranch}` : "Detached HEAD"}</span></div>
-    <form className="branch-create" onSubmit={(event) => { event.preventDefault(); if (name.trim()) void onCreate(name.trim()).then((created) => { if (created) setName(""); }); }}>
+    {!compact && <form className="branch-create" onSubmit={(event) => { event.preventDefault(); if (name.trim()) void onCreate(name.trim()).then((created) => { if (created) setName(""); }); }}>
       <label htmlFor="new-branch">Create local branch from HEAD</label>
       <div><input id="new-branch" value={name} onChange={(event) => setName(event.target.value)} placeholder="feature/name" disabled={busy} /><button disabled={busy || !name.trim()}>Create</button></div>
-    </form>
+    </form>}
     {state.phase === "loading" && <p className="status-placeholder">Loading branches…</p>}
     {state.phase === "error" && <p className="error" role="alert">{state.message} <button className="secondary" disabled={busy} onClick={onRetry}>Retry</button></p>}
     {error && <p className="error" role="alert">{error}</p>}
     {state.phase === "ready" && <div className="branch-groups">
-      <BranchGroup title="Local" branches={branches.filter((branch) => branch.kind === "local")} busy={busy} onCheckout={onCheckout} />
+      <BranchGroup title="Local" branches={branches.filter((branch) => branch.kind === "local")} busy={busy} onCheckout={onCheckout} onRename={compact ? undefined : onRename} onDelete={compact ? undefined : onDelete} />
       <BranchGroup title="Remote tracking" branches={branches.filter((branch) => branch.kind === "remote")} busy={busy} />
     </div>}
   </section>;

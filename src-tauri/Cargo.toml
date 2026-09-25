@@ -17,7 +17,8 @@ serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tokio = { version = "1", features = ["process", "time", "macros", "rt-multi-thread", "sync", "io-util"] }
+tempfile = "3"
+sha2 = "0.10"
 
 [dev-dependencies]
-tempfile = "3"
 serde_json = "1"
