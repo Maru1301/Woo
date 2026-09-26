@@ -67,7 +67,7 @@ pub struct ConflictFile {
     pub theirs: Option<ConflictStage>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryState {
     pub status: RepositoryStatus,

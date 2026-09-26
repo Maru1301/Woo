@@ -11,6 +11,7 @@ pub mod repository;
 pub mod stash;
 pub mod status;
 pub mod tags;
+pub mod watcher;
 pub mod working_tree;
 
 use branches::BranchList;
@@ -25,7 +26,8 @@ use stash::StashList;
 use status::{FileChange, RepositoryStatus};
 use std::sync::Arc;
 use tags::TagList;
-use tauri::State;
+use tauri::{AppHandle, State};
+use watcher::RepositoryWatchManager;
 use working_tree::{
     BranchRefMutationResult, CheckoutResult, CommitResult, ConflictMutationResult,
     HistoryMutationResult, MergeMutationResult, ResetMode, StashMutationResult, TagMutationResult,
@@ -37,6 +39,14 @@ async fn get_repository_state(
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<RepositoryState, AppError> {
     state.repository_state().await
+}
+
+#[tauri::command]
+async fn revalidate_repository(
+    watcher: State<'_, Arc<RepositoryWatchManager>>,
+) -> Result<(), AppError> {
+    watcher.revalidate().await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -306,8 +316,15 @@ async fn checkout_branch(
 async fn open_repository(
     path: String,
     state: State<'_, Arc<WorkingTree>>,
+    watcher: State<'_, Arc<RepositoryWatchManager>>,
+    app: AppHandle,
 ) -> Result<RepositoryInfo, AppError> {
-    state.open(&path).await
+    watcher.stop().await;
+    let mut info = state.open(&path).await?;
+    if let Err(error) = watcher.start(&app, Arc::clone(state.inner()), &info).await {
+        info.watch_warning = Some(error.message);
+    }
+    Ok(info)
 }
 
 #[tauri::command]
@@ -417,8 +434,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(WorkingTree::default()))
+        .manage(Arc::new(RepositoryWatchManager::default()))
         .invoke_handler(tauri::generate_handler![
             get_repository_state,
+            revalidate_repository,
             get_conflict_content,
             merge_branch,
             complete_merge,

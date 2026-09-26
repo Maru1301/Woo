@@ -1,4 +1,6 @@
-# Architecture (M12)
+# Architecture (M12 + F1)
+
+F1 adds one Rust watcher scoped to the active repository session. It observes the worktree and Git-resolved metadata paths, coalesces notifications, and validates hints through the existing `WorkingTree` mutex and Git operations. It emits structured, session-tagged state updates; React applies targeted status, branch/ref, history/graph, tag, operation/conflict, and diff invalidation. Git remains authoritative. The watcher does not poll or replace manual Refresh.
 
 M12 adds index-only partial staging without changing the React → semantic Tauri commands → Rust application → system Git boundary. The M5 diff model now carries a raw-patch fingerprint and partial-stage eligibility. React selects one hunk or changed lines in one hunk. Rust re-reads the targeted patch under the existing repository mutex, verifies the fingerprint, constructs a patch, and invokes `git apply --cached` (or `--reverse`) with stdin. The result refreshes status plus only the affected file's staged and unstaged diffs. History, graph, branches, and remotes are untouched. See ADR 0005.
 

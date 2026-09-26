@@ -5,8 +5,9 @@ export type WorkspaceView = "history" | "changes" | "manage";
 type DetailPosition = "right" | "bottom";
 type SizePreset = "balanced" | "history" | "detail";
 
-export function WorkspaceLayout({ repository, activeView, onViewChange, onOpen, openDisabled, remoteControls, sidebar, changeCount, busy, children }: {
+export function WorkspaceLayout({ repository, repositoryError, activeView, onViewChange, onOpen, openDisabled, remoteControls, sidebar, changeCount, busy, children }: {
   repository: RepositoryInfo | null;
+  repositoryError?: string;
   activeView: WorkspaceView;
   onViewChange: (view: WorkspaceView) => void;
   onOpen: () => void;
@@ -47,6 +48,7 @@ export function WorkspaceLayout({ repository, activeView, onViewChange, onOpen, 
     <div className="woo-tabs" aria-label="Open repository">
       {repository ? <span className="woo-repo-tab" title={repository.path}>{changeCount > 0 && <span className="woo-dirty">●</span>}{repoName}</span> : <span className="woo-repo-tab woo-repo-tab-empty">No repository open</span>}
     </div>
+    {repository && (repositoryError || repository.watchWarning) && <p className="error woo-repository-alert" role="alert">{repositoryError || `Auto refresh unavailable: ${repository.watchWarning}. Use Refresh to update repository state.`}</p>}
     <div className="woo-main">
       {repository && <aside className="woo-sidebar" aria-label="Workspace navigation">
         <nav className="woo-nav">

@@ -26,7 +26,7 @@ pub struct BranchInfo {
     pub upstream: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchList {
     pub branches: Vec<BranchInfo>,

@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { createTag, deleteTag, getTags, messageForError, type TagList, type TagMutationResult } from "./lib/repository";
 
-export default function TagPanel({ busy, onBusyChange, onMutation, onInconsistent }: {
+export default function TagPanel({ busy, onBusyChange, onMutation, onInconsistent, refreshToken = 0 }: {
   busy: boolean;
   onBusyChange: (busy: boolean) => void;
   onMutation: (result: TagMutationResult) => void;
   onInconsistent: (message: string) => void;
+  refreshToken?: number;
 }) {
   const [list, setList] = useState<TagList | null>(null);
   const [name, setName] = useState("");
@@ -19,9 +20,15 @@ export default function TagPanel({ busy, onBusyChange, onMutation, onInconsisten
   const alive = useRef(true);
   const request = useRef(0);
   const locked = useRef(false);
+  const previousRefresh = useRef(refreshToken);
+  useEffect(() => {
+    if (previousRefresh.current === refreshToken) return;
+    previousRefresh.current = refreshToken;
+    void refresh();
+  }, [refreshToken]);
   useEffect(() => {
     alive.current = true;
-    void getTags().then((result) => { if (alive.current) setList(result); }, (cause) => { if (alive.current) setError(messageForError(cause)); });
+    void refresh();
     return () => { alive.current = false; request.current += 1; };
   }, []);
   async function refresh() {

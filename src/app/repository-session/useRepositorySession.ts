@@ -33,7 +33,8 @@ type SessionAction =
   | { type: "branchRefs"; result: BranchRefMutationResult }
   | { type: "stash"; result: StashMutationResult }
   | { type: "remote"; result: RemoteRefresh }
-  | { type: "historyMutation"; result: MergeMutationResult | HistoryMutationResult };
+  | { type: "historyMutation"; result: MergeMutationResult | HistoryMutationResult }
+  | { type: "watchIdentity"; branch: string | null; head: RepositoryInfo["head"] };
 
 const initialState: RepositorySessionState = {
   repository: null,
@@ -47,6 +48,7 @@ function repositorySessionReducer(state: RepositorySessionState, action: Session
   switch (action.type) {
     case "reset": return initialState;
     case "opened": return { ...state, repository: action.repository };
+    case "watchIdentity": return { ...state, repository: state.repository && { ...state.repository, branch: action.branch, head: action.head } };
     case "statusLoading": return { ...state, status: { phase: "loading", data: null } };
     case "statusError": return {
       ...state,

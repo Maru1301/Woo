@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeadInfo {
     pub hash: String,
@@ -23,6 +23,8 @@ pub struct RepositoryInfo {
     pub branch: Option<String>,
     pub head: Option<HeadInfo>,
     pub open_duration_ms: u128,
+    pub session_id: u64,
+    pub watch_warning: Option<String>,
 }
 
 fn parse_head(output: &GitOutput) -> Result<HeadInfo, AppError> {
@@ -95,6 +97,27 @@ pub async fn open(git: &GitRunner, input: &str) -> Result<RepositoryInfo, AppErr
     }
     let root_directory = Path::new(&path);
 
+    let (branch, head) = read_identity(git, root_directory).await?;
+
+    eprintln!(
+        "Repository.Open elapsed_ms={} path={}",
+        started.elapsed().as_millis(),
+        path
+    );
+    Ok(RepositoryInfo {
+        path,
+        branch,
+        head,
+        open_duration_ms: started.elapsed().as_millis(),
+        session_id: 0,
+        watch_warning: None,
+    })
+}
+
+pub async fn read_identity(
+    git: &GitRunner,
+    root_directory: &Path,
+) -> Result<(Option<String>, Option<HeadInfo>), AppError> {
     let branch_output = git
         .run(
             root_directory,
@@ -124,15 +147,5 @@ pub async fn open(git: &GitRunner, input: &str) -> Result<RepositoryInfo, AppErr
         return Err(git_failure(&head_output));
     };
 
-    eprintln!(
-        "Repository.Open elapsed_ms={} path={}",
-        started.elapsed().as_millis(),
-        path
-    );
-    Ok(RepositoryInfo {
-        path,
-        branch,
-        head,
-        open_duration_ms: started.elapsed().as_millis(),
-    })
+    Ok((branch, head))
 }

@@ -22,7 +22,7 @@ pub struct FileChange {
     pub kind: ChangeKind,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct RepositoryStatus {
     pub staged: Vec<FileChange>,
     pub unstaged: Vec<FileChange>,

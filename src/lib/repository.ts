@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export interface HeadInfo { hash: string; subject: string; authorDate: string }
-export interface RepositoryInfo { path: string; branch: string | null; head: HeadInfo | null; openDurationMs: number }
+export interface RepositoryInfo { path: string; branch: string | null; head: HeadInfo | null; openDurationMs: number; sessionId: number; watchWarning: string | null }
 export interface AppError { code: string; message: string }
 export type ChangeKind = "added" | "modified" | "deleted" | "renamed" | "copied" | "type_changed" | "conflicted" | "untracked";
 export interface FileChange { path: string; oldPath: string | null; kind: ChangeKind }
@@ -13,6 +13,7 @@ export type ConflictKind = "both_modified" | "both_added" | "deleted_by_us" | "d
 export interface ConflictStage { objectHash: string; mode: string }
 export interface ConflictFile { path: string; kind: ConflictKind; base: ConflictStage | null; ours: ConflictStage | null; theirs: ConflictStage | null }
 export interface RepositoryState { status: RepositoryStatus; operation: RepositoryOperation; conflicts: ConflictFile[] }
+export interface AutoRefreshEvent { sessionId: number; sequence: number; state: RepositoryState | null; branch: string | null | undefined; head: HeadInfo | null | undefined; branches: BranchList | null; resetHistory: boolean; refreshHistory: boolean; refreshTags: boolean; clearDiff: boolean; diffPaths: string[]; unavailable: AppError | null; coalescedEvents: number; validationMs: number; gitProcessCount: number }
 export interface ContentPart { text: string | null; isBinary: boolean; oversized: boolean }
 export interface ConflictContent { path: string; base: ContentPart | null; ours: ContentPart | null; theirs: ContentPart | null; working: ContentPart | null }
 export type MergeOutcome = "already_up_to_date" | "fast_forward" | "clean_merge" | "needs_resolution" | "needs_completion" | "failed" | "completed" | "aborted";
@@ -49,6 +50,7 @@ export interface PartialSelection { revision: string; hunkIndex: number; lineInd
 export interface PartialStageResult { status: RepositoryStatus; stagedDiff: DiffFile | null; unstagedDiff: DiffFile | null; error: AppError | null }
 
 export function getRepositoryState(): Promise<RepositoryState> { return invoke<RepositoryState>("get_repository_state"); }
+export function revalidateRepository(): Promise<void> { return invoke<void>("revalidate_repository"); }
 export function getConflictContent(path: string): Promise<ConflictContent> { return invoke<ConflictContent>("get_conflict_content", { path }); }
 export function mergeBranch(fullRef: string): Promise<MergeMutationResult> { return invoke<MergeMutationResult>("merge_branch", { fullRef }); }
 export function completeMerge(message: string): Promise<MergeMutationResult> { return invoke<MergeMutationResult>("complete_merge", { message }); }

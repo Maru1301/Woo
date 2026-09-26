@@ -528,9 +528,59 @@ impl WorkingTree {
         let mut current = self.repository.lock().await;
         self.generation.fetch_add(1, Ordering::SeqCst);
         *current = None;
-        let info = repository::open(&self.git, path).await?;
+        let mut info = repository::open(&self.git, path).await?;
+        info.session_id = self.generation.load(Ordering::SeqCst);
         *current = Some(PathBuf::from(&info.path));
         Ok(info)
+    }
+
+    pub async fn watch_snapshot(
+        &self,
+        session_id: u64,
+        read_state: bool,
+        read_identity: bool,
+        read_branches: bool,
+        previous_head: Option<&str>,
+    ) -> Result<crate::watcher::ValidatedState, AppError> {
+        let current = self.repository.lock().await;
+        if self.generation.load(Ordering::SeqCst) != session_id {
+            return Err(AppError::new(
+                "repository_changed",
+                "The repository session changed.",
+            ));
+        }
+        let path = current
+            .as_deref()
+            .ok_or_else(|| AppError::new("no_repository", "Open a repository first."))?;
+        if !path.is_dir() {
+            return Err(AppError::new(
+                "repository_unavailable",
+                "The repository is unavailable.",
+            ));
+        }
+        let identity = if read_identity {
+            Some(repository::read_identity(&self.git, path).await?)
+        } else {
+            None
+        };
+        let head_changed = identity
+            .as_ref()
+            .is_some_and(|(_, head)| head.as_ref().map(|head| head.hash.as_str()) != previous_head);
+        let state = if read_state || head_changed {
+            Some(load_repository_state(&self.git, path).await?)
+        } else {
+            None
+        };
+        let branches = if read_branches {
+            Some(branches::load_branches(&self.git, path).await?.0)
+        } else {
+            None
+        };
+        Ok(crate::watcher::ValidatedState {
+            identity,
+            state,
+            branches,
+        })
     }
 
     pub async fn remotes(&self) -> Result<RemoteList, AppError> {
