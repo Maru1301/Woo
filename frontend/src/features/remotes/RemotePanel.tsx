@@ -38,7 +38,7 @@ export default function RemotePanel({ onComplete, onInconsistent, onBusyChange, 
       catch (cause) { if (alive.current) setError(messageForError(cause)); break; }
       if (!alive.current) break;
       setOperation(next);
-      if (next.phase === "completed" || next.phase === "failed" || next.phase === "cancelled") {
+      if (next.phase === "completed" || next.phase === "failed" || next.phase === "cancelled" || next.phase === "timed_out") {
         if (next.refresh) callbacks.current.onComplete(next.refresh);
         else if (next.error?.code === "remote_refresh_failed") callbacks.current.onInconsistent(next.error.message);
       }
@@ -46,7 +46,7 @@ export default function RemotePanel({ onComplete, onInconsistent, onBusyChange, 
         setNotice(`${next.kind[0].toUpperCase()}${next.kind.slice(1)} complete.`);
         break;
       }
-      if (next.phase === "failed" || next.phase === "cancelled") {
+      if (next.phase === "failed" || next.phase === "cancelled" || next.phase === "timed_out") {
         setError(next.error?.message || "The remote operation stopped.");
         break;
       }

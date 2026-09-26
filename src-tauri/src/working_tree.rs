@@ -8,6 +8,7 @@ use crate::{
     error::{git_failure, AppError},
     git::{GitRunError, GitRunner},
     history::{self, CommitHistoryPage},
+    operation_log::{OperationLog, OperationOutcome, OperationSource},
     partial_stage::{self, PartialSelection},
     remotes::{self, RemoteList},
     repository::{self, HeadInfo, RepositoryInfo},
@@ -17,6 +18,7 @@ use crate::{
 };
 use serde::Serialize;
 use std::{
+    future::Future,
     path::{Component, Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -24,7 +26,7 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{broadcast, watch, Mutex};
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +44,7 @@ pub enum RemotePhase {
     Completed,
     Failed,
     Cancelled,
+    TimedOut,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -61,6 +64,8 @@ pub struct RemoteRefresh {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteOperationStatus {
     pub id: u64,
+    pub session_id: u64,
+    pub source: OperationSource,
     pub kind: RemoteKind,
     pub phase: RemotePhase,
     pub started_at_ms: u128,
@@ -484,8 +489,19 @@ pub struct WorkingTree {
     git: GitRunner,
     repository: Mutex<Option<PathBuf>>,
     generation: AtomicU64,
+    session_id: AtomicU64,
     remote_task: Mutex<Option<RemoteTask>>,
     next_operation_id: AtomicU64,
+    operation_log: OperationLog,
+    remote_completions: broadcast::Sender<RemoteOperationStatus>,
+    active_user_operations: AtomicU64,
+}
+
+struct UserOperationGuard<'a>(&'a AtomicU64);
+impl Drop for UserOperationGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Default for WorkingTree {
@@ -494,13 +510,20 @@ impl Default for WorkingTree {
             git: GitRunner::with_timeout(Duration::from_secs(60)),
             repository: Mutex::new(None),
             generation: AtomicU64::new(0),
+            session_id: AtomicU64::new(0),
             remote_task: Mutex::new(None),
             next_operation_id: AtomicU64::new(0),
+            operation_log: OperationLog::default(),
+            remote_completions: broadcast::channel(16).0,
+            active_user_operations: AtomicU64::new(0),
         }
     }
 }
 
 impl WorkingTree {
+    pub fn active_session_id(&self) -> u64 {
+        self.session_id.load(Ordering::SeqCst)
+    }
     async fn snapshot(&self) -> Result<(PathBuf, u64), AppError> {
         let current = self.repository.lock().await;
         let path = current
@@ -527,11 +550,20 @@ impl WorkingTree {
         self.cancel_active_remote().await;
         let mut current = self.repository.lock().await;
         self.generation.fetch_add(1, Ordering::SeqCst);
+        self.session_id.fetch_add(1, Ordering::SeqCst);
         *current = None;
         let mut info = repository::open(&self.git, path).await?;
-        info.session_id = self.generation.load(Ordering::SeqCst);
+        info.session_id = self.session_id.load(Ordering::SeqCst);
         *current = Some(PathBuf::from(&info.path));
         Ok(info)
+    }
+
+    pub async fn close(&self) {
+        self.cancel_active_remote().await;
+        let mut current = self.repository.lock().await;
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.session_id.fetch_add(1, Ordering::SeqCst);
+        *current = None;
     }
 
     pub async fn watch_snapshot(
@@ -543,7 +575,7 @@ impl WorkingTree {
         previous_head: Option<&str>,
     ) -> Result<crate::watcher::ValidatedState, AppError> {
         let current = self.repository.lock().await;
-        if self.generation.load(Ordering::SeqCst) != session_id {
+        if self.session_id.load(Ordering::SeqCst) != session_id {
             return Err(AppError::new(
                 "repository_changed",
                 "The repository session changed.",
@@ -602,13 +634,153 @@ impl WorkingTree {
         }
     }
 
+    pub async fn cancel_background_remote(&self) {
+        let task = self.remote_task.lock().await;
+        if let Some(task) = task
+            .as_ref()
+            .filter(|task| task.status.source == OperationSource::Background)
+        {
+            if matches!(
+                task.status.phase,
+                RemotePhase::Queued | RemotePhase::Running
+            ) {
+                let _ = task.cancel.send(true);
+            }
+        }
+    }
+
+    pub async fn operation_history(&self) -> Vec<crate::operation_log::OperationEntry> {
+        self.operation_log.list().await
+    }
+
+    pub fn remote_completions(&self) -> broadcast::Receiver<RemoteOperationStatus> {
+        self.remote_completions.subscribe()
+    }
+
+    pub async fn logged_user<T, F>(&self, kind: &str, future: F) -> Result<T, AppError>
+    where
+        T: OperationOutcome,
+        F: Future<Output = Result<T, AppError>>,
+    {
+        self.cancel_background_remote().await;
+        let (path, _) = self.snapshot().await?;
+        let id = self.next_operation_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let started = Instant::now();
+        self.active_user_operations.fetch_add(1, Ordering::SeqCst);
+        let _guard = UserOperationGuard(&self.active_user_operations);
+        self.operation_log
+            .begin(
+                id,
+                path.to_string_lossy().into_owned(),
+                kind,
+                OperationSource::User,
+            )
+            .await;
+        let result = future.await;
+        let error = match &result {
+            Ok(value) => value.semantic_error(),
+            Err(error) => Some(error),
+        };
+        self.operation_log.finish(id, started, error).await;
+        result
+    }
+
     pub async fn start_remote(
         self: &Arc<Self>,
         kind: RemoteKind,
         remote: Option<&str>,
     ) -> Result<RemoteOperationStatus, AppError> {
+        let mut completed = self.remote_completions();
+        let background_id = self
+            .remote_task
+            .lock()
+            .await
+            .as_ref()
+            .filter(|task| {
+                task.status.source == OperationSource::Background
+                    && matches!(
+                        task.status.phase,
+                        RemotePhase::Queued | RemotePhase::Running
+                    )
+            })
+            .map(|task| task.status.id);
+        self.cancel_background_remote().await;
+        if let Some(background_id) = background_id {
+            let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match completed.recv().await {
+                        Ok(status) if status.id == background_id => break,
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            })
+            .await;
+            if stopped.is_err() {
+                return Err(AppError::new(
+                    "operation_busy",
+                    "Background fetch is still stopping. Try again shortly.",
+                ));
+            }
+        }
+        self.start_remote_with_source(kind, remote, OperationSource::User)
+            .await
+    }
+
+    pub async fn start_background_fetch(
+        self: &Arc<Self>,
+        expected_session: u64,
+    ) -> Result<Option<RemoteOperationStatus>, AppError> {
+        if self.active_user_operations.load(Ordering::SeqCst) > 0 {
+            return Ok(None);
+        }
+        let current = match self.repository.try_lock() {
+            Ok(current) => current,
+            Err(_) => return Ok(None),
+        };
+        if self.session_id.load(Ordering::SeqCst) != expected_session {
+            return Ok(None);
+        }
+        let Some(path) = current.as_ref() else {
+            return Ok(None);
+        };
+        let slot = match self.remote_task.try_lock() {
+            Ok(slot) => slot,
+            Err(_) => return Ok(None),
+        };
+        if slot.as_ref().is_some_and(|task| {
+            matches!(
+                task.status.phase,
+                RemotePhase::Queued | RemotePhase::Running
+            )
+        }) {
+            return Ok(None);
+        }
+        drop(slot);
+        if !matches!(
+            conflicts::operation_state(&self.git, path).await?,
+            RepositoryOperationState::None
+        ) {
+            return Ok(None);
+        }
+        let (configured, _) = remotes::load_remotes(&self.git, path).await?;
+        if configured.remotes.is_empty() {
+            return Ok(None);
+        }
+        drop(current);
+        self.start_remote_with_source(RemoteKind::Fetch, None, OperationSource::Background)
+            .await
+            .map(Some)
+    }
+
+    async fn start_remote_with_source(
+        self: &Arc<Self>,
+        kind: RemoteKind,
+        remote: Option<&str>,
+        source: OperationSource,
+    ) -> Result<RemoteOperationStatus, AppError> {
         let (path, generation) = self.snapshot().await?;
-        let remote = if matches!(kind, RemoteKind::Fetch) {
+        let remote = if matches!(kind, RemoteKind::Fetch) && source == OperationSource::User {
             let name = remote
                 .ok_or_else(|| AppError::new("remote_missing", "Choose a remote to fetch."))?;
             let (configured, _) = remotes::load_remotes(&self.git, &path).await?;
@@ -639,6 +811,8 @@ impl WorkingTree {
         let (cancel, receiver) = watch::channel(false);
         let status = RemoteOperationStatus {
             id,
+            session_id: self.session_id.load(Ordering::SeqCst),
+            source,
             kind,
             phase: RemotePhase::Queued,
             started_at_ms: SystemTime::now()
@@ -657,6 +831,18 @@ impl WorkingTree {
             cancel,
         });
         drop(slot);
+        self.operation_log
+            .begin(
+                id,
+                path.to_string_lossy().into_owned(),
+                match kind {
+                    RemoteKind::Fetch => "Fetch",
+                    RemoteKind::Pull => "Pull",
+                    RemoteKind::Push => "Push",
+                },
+                source,
+            )
+            .await;
         let owner = Arc::clone(self);
         tokio::spawn(async move {
             owner
@@ -704,12 +890,18 @@ impl WorkingTree {
         Ok(task.status.clone())
     }
 
-    async fn update_remote(&self, id: u64, update: impl FnOnce(&mut RemoteOperationStatus)) {
+    async fn update_remote(
+        &self,
+        id: u64,
+        update: impl FnOnce(&mut RemoteOperationStatus),
+    ) -> Option<RemoteOperationStatus> {
         let mut slot = self.remote_task.lock().await;
         if let Some(task) = slot.as_mut().filter(|task| task.status.id == id) {
             update(&mut task.status);
             task.status.elapsed_ms = task.started.elapsed().as_millis();
+            return Some(task.status.clone());
         }
+        None
     }
 
     async fn run_remote_task(
@@ -720,31 +912,51 @@ impl WorkingTree {
         remote: Option<String>,
         cancelled: watch::Receiver<bool>,
     ) {
+        let started = Instant::now();
+        let source = self
+            .remote_status(id)
+            .await
+            .map(|status| status.source)
+            .unwrap_or(OperationSource::User);
         let outcome = self
-            .execute_remote(id, generation, kind, remote.as_deref(), cancelled)
+            .execute_remote(id, generation, kind, remote.as_deref(), cancelled, source)
             .await;
-        self.update_remote(id, |status| match outcome {
-            Ok(completion) => {
-                status.phase = match completion.error.as_ref().map(|error| error.code) {
-                    Some("operation_cancelled") => RemotePhase::Cancelled,
-                    Some(_) => RemotePhase::Failed,
-                    None => RemotePhase::Completed,
-                };
-                status.git_duration_ms = completion.git_ms;
-                status.refresh_duration_ms = Some(completion.refresh_ms);
-                status.refresh = Some(completion.refresh);
-                status.error = completion.error;
-            }
-            Err(error) => {
-                status.phase = if error.code == "operation_cancelled" {
-                    RemotePhase::Cancelled
-                } else {
-                    RemotePhase::Failed
-                };
-                status.error = Some(error);
-            }
-        })
-        .await;
+        let log_error = match &outcome {
+            Ok(completion) => completion.error.clone(),
+            Err(error) => Some(error.clone()),
+        };
+        self.operation_log
+            .finish(id, started, log_error.as_ref())
+            .await;
+        let completed = self
+            .update_remote(id, |status| match outcome {
+                Ok(completion) => {
+                    status.phase = match completion.error.as_ref().map(|error| error.code) {
+                        Some("operation_cancelled") => RemotePhase::Cancelled,
+                        Some("git_timeout") => RemotePhase::TimedOut,
+                        Some(_) => RemotePhase::Failed,
+                        None => RemotePhase::Completed,
+                    };
+                    status.git_duration_ms = completion.git_ms;
+                    status.refresh_duration_ms = Some(completion.refresh_ms);
+                    status.refresh = Some(completion.refresh);
+                    status.error = completion.error;
+                }
+                Err(error) => {
+                    status.phase = if error.code == "operation_cancelled" {
+                        RemotePhase::Cancelled
+                    } else if error.code == "git_timeout" {
+                        RemotePhase::TimedOut
+                    } else {
+                        RemotePhase::Failed
+                    };
+                    status.error = Some(error);
+                }
+            })
+            .await;
+        if let Some(status) = completed {
+            let _ = self.remote_completions.send(status);
+        }
     }
 
     async fn execute_remote(
@@ -754,8 +966,18 @@ impl WorkingTree {
         kind: RemoteKind,
         remote: Option<&str>,
         cancelled: watch::Receiver<bool>,
+        source: OperationSource,
     ) -> Result<RemoteCompletion, AppError> {
-        let current = self.repository.lock().await;
+        let current = if source == OperationSource::Background {
+            self.repository.try_lock().map_err(|_| {
+                AppError::new(
+                    "operation_busy",
+                    "User operation is active; background fetch skipped.",
+                )
+            })?
+        } else {
+            self.repository.lock().await
+        };
         self.ensure_generation(generation)?;
         let path = current
             .as_deref()
@@ -772,11 +994,25 @@ impl WorkingTree {
         self.update_remote(id, |status| status.phase = RemotePhase::Running)
             .await;
         let args: Vec<&str> = match kind {
-            RemoteKind::Fetch => vec!["fetch", "--", remote.expect("validated fetch remote")],
+            RemoteKind::Fetch => {
+                if let Some(remote) = remote {
+                    vec!["fetch", "--", remote]
+                } else {
+                    vec!["fetch", "--all"]
+                }
+            }
             RemoteKind::Pull => vec!["pull"],
             RemoteKind::Push => vec!["push"],
         };
-        let process = self.git.run_remote(path, &args, cancelled, None).await;
+        let process = self
+            .git
+            .run_remote(
+                path,
+                &args,
+                cancelled,
+                (source == OperationSource::Background).then_some(Duration::from_secs(120)),
+            )
+            .await;
         let (git_ms, operation_error) = match process {
             Ok(output) => {
                 let error = (!output.success()).then(|| remotes::remote_failure(&output));

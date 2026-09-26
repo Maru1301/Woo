@@ -8,6 +8,7 @@ use std::{
 use tempfile::TempDir;
 use woo_lib::{
     git::{GitRunError, GitRunner},
+    operation_log::{OperationPhase, OperationSource},
     working_tree::{RemoteKind, RemoteOperationStatus, RemotePhase, WorkingTree},
 };
 
@@ -114,6 +115,9 @@ async fn fetch_updates_remote_refs_without_touching_worktree() {
         "operation_busy"
     );
     let finished = wait(&tree, started.id).await;
+    let history = tree.operation_history().await;
+    assert_eq!(history[0].source, OperationSource::User);
+    assert_eq!(history[0].phase, OperationPhase::Completed);
     assert!(
         matches!(finished.phase, RemotePhase::Completed),
         "{:?}",
@@ -134,6 +138,82 @@ async fn fetch_updates_remote_refs_without_touching_worktree() {
         finished.git_duration_ms,
         finished.refresh_duration_ms
     );
+}
+
+#[tokio::test]
+async fn background_fetch_uses_active_session_and_logs_one_semantic_operation() {
+    let fixture = Fixture::new();
+    let tree = Arc::new(WorkingTree::default());
+    let info = tree.open(fixture.b.to_str().unwrap()).await.unwrap();
+    assert!(tree
+        .start_background_fetch(info.session_id + 1)
+        .await
+        .unwrap()
+        .is_none());
+    let new_head = Fixture::commit(&fixture.a, "background update\n", "Background update");
+    git(&fixture.a, &["push"]);
+    let mut completion = tree.remote_completions();
+    let operation_started = Instant::now();
+    let started = tree
+        .start_background_fetch(info.session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(started.source, OperationSource::Background);
+    let done = tokio::time::timeout(Duration::from_secs(20), completion.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(done.id, started.id);
+    assert!(
+        matches!(done.phase, RemotePhase::Completed),
+        "{:?}",
+        done.error
+    );
+    assert!(done.refresh.unwrap().status.is_none());
+    eprintln!(
+        "F3 local background fetch total_ms={} git_ms={:?} refresh_ms={:?}",
+        operation_started.elapsed().as_millis(),
+        done.git_duration_ms,
+        done.refresh_duration_ms
+    );
+    assert_eq!(
+        git(&fixture.b, &["rev-parse", "refs/remotes/origin/main"]),
+        new_head
+    );
+    let history = tree.operation_history().await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].source, OperationSource::Background);
+    assert_eq!(history[0].phase, OperationPhase::Completed);
+    assert!(tree
+        .start_background_fetch(info.session_id)
+        .await
+        .unwrap()
+        .is_some());
+    tree.close().await;
+    assert!(tree
+        .start_background_fetch(info.session_id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn background_fetch_skips_an_active_merge_without_logging_a_fetch() {
+    let fixture = Fixture::new();
+    git(&fixture.b, &["checkout", "-b", "feature"]);
+    Fixture::commit(&fixture.b, "feature\n", "Feature");
+    git(&fixture.b, &["checkout", "main"]);
+    Fixture::commit(&fixture.b, "main\n", "Main");
+    assert!(!output(&fixture.b, &["merge", "feature"]).status.success());
+    let tree = Arc::new(WorkingTree::default());
+    let opened = tree.open(fixture.b.to_str().unwrap()).await.unwrap();
+    assert!(tree
+        .start_background_fetch(opened.session_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(tree.operation_history().await.is_empty());
 }
 
 #[tokio::test]
@@ -193,6 +273,14 @@ async fn push_and_non_fast_forward_refusal() {
     let failed = wait(&tree, started.id).await;
     assert!(matches!(failed.phase, RemotePhase::Failed));
     assert!(failed.error.unwrap().message.contains("rejected"));
+    let history = tree.operation_history().await;
+    assert_eq!(history[0].source, OperationSource::User);
+    assert_eq!(history[0].phase, OperationPhase::Failed);
+    assert!(history[0]
+        .diagnostics
+        .as_ref()
+        .unwrap()
+        .contains("rejected"));
 }
 
 #[tokio::test]

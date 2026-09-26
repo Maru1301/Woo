@@ -1,3 +1,4 @@
+pub mod background_fetch;
 pub mod branches;
 pub mod conflicts;
 pub mod diff;
@@ -5,6 +6,7 @@ mod error;
 pub mod git;
 pub mod graph;
 pub mod history;
+pub mod operation_log;
 pub mod partial_stage;
 pub mod remotes;
 pub mod repository;
@@ -13,12 +15,15 @@ pub mod status;
 pub mod tags;
 pub mod watcher;
 pub mod working_tree;
+pub mod workspace;
 
+use background_fetch::BackgroundFetchManager;
 use branches::BranchList;
 use conflicts::{ConflictContent, ConflictSide, RepositoryState};
 use diff::DiffFile;
 use error::AppError;
 use history::CommitHistoryPage;
+use operation_log::OperationEntry;
 use partial_stage::PartialSelection;
 use remotes::RemoteList;
 use repository::RepositoryInfo;
@@ -26,13 +31,21 @@ use stash::StashList;
 use status::{FileChange, RepositoryStatus};
 use std::sync::Arc;
 use tags::TagList;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use watcher::RepositoryWatchManager;
 use working_tree::{
     BranchRefMutationResult, CheckoutResult, CommitResult, ConflictMutationResult,
     HistoryMutationResult, MergeMutationResult, ResetMode, StashMutationResult, TagMutationResult,
     WorkingTree,
 };
+use workspace::{WorkspaceCatalog, WorkspaceManager};
+
+#[tauri::command]
+async fn get_operation_history(
+    state: State<'_, Arc<WorkingTree>>,
+) -> Result<Vec<OperationEntry>, AppError> {
+    Ok(state.operation_history().await)
+}
 
 #[tauri::command]
 async fn get_repository_state(
@@ -62,7 +75,9 @@ async fn merge_branch(
     full_ref: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<MergeMutationResult, AppError> {
-    state.merge_branch(&full_ref).await
+    state
+        .logged_user("Merge", state.merge_branch(&full_ref))
+        .await
 }
 
 #[tauri::command]
@@ -70,12 +85,14 @@ async fn complete_merge(
     message: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<MergeMutationResult, AppError> {
-    state.complete_merge(&message).await
+    state
+        .logged_user("Complete merge", state.complete_merge(&message))
+        .await
 }
 
 #[tauri::command]
 async fn abort_merge(state: State<'_, Arc<WorkingTree>>) -> Result<MergeMutationResult, AppError> {
-    state.abort_merge().await
+    state.logged_user("Abort merge", state.abort_merge()).await
 }
 
 #[tauri::command]
@@ -83,7 +100,9 @@ async fn rebase_onto(
     full_ref: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<HistoryMutationResult, AppError> {
-    state.rebase_onto(&full_ref).await
+    state
+        .logged_user("Rebase", state.rebase_onto(&full_ref))
+        .await
 }
 
 #[tauri::command]
@@ -91,7 +110,9 @@ async fn cherry_pick(
     commit: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<HistoryMutationResult, AppError> {
-    state.cherry_pick(&commit).await
+    state
+        .logged_user("Cherry-pick", state.cherry_pick(&commit))
+        .await
 }
 
 #[tauri::command]
@@ -99,7 +120,9 @@ async fn revert_commit(
     commit: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<HistoryMutationResult, AppError> {
-    state.revert_commit(&commit).await
+    state
+        .logged_user("Revert", state.revert_commit(&commit))
+        .await
 }
 
 #[tauri::command]
@@ -108,28 +131,36 @@ async fn reset_to(
     mode: ResetMode,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<HistoryMutationResult, AppError> {
-    state.reset_to(&commit, mode).await
+    state
+        .logged_user("Reset", state.reset_to(&commit, mode))
+        .await
 }
 
 #[tauri::command]
 async fn continue_history_operation(
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<HistoryMutationResult, AppError> {
-    state.continue_history_operation().await
+    state
+        .logged_user("Continue operation", state.continue_history_operation())
+        .await
 }
 
 #[tauri::command]
 async fn skip_history_operation(
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<HistoryMutationResult, AppError> {
-    state.skip_history_operation().await
+    state
+        .logged_user("Skip operation", state.skip_history_operation())
+        .await
 }
 
 #[tauri::command]
 async fn abort_history_operation(
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<HistoryMutationResult, AppError> {
-    state.abort_history_operation().await
+    state
+        .logged_user("Abort operation", state.abort_history_operation())
+        .await
 }
 
 #[tauri::command]
@@ -140,7 +171,10 @@ async fn save_conflict_text(
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<ConflictMutationResult, AppError> {
     state
-        .save_conflict_text(&path, expected.as_deref(), &text)
+        .logged_user(
+            "Save conflict resolution",
+            state.save_conflict_text(&path, expected.as_deref(), &text),
+        )
         .await
 }
 
@@ -150,7 +184,9 @@ async fn use_conflict_side(
     side: ConflictSide,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<ConflictMutationResult, AppError> {
-    state.use_conflict_side(&path, side).await
+    state
+        .logged_user("Resolve conflict", state.use_conflict_side(&path, side))
+        .await
 }
 
 #[tauri::command]
@@ -158,7 +194,9 @@ async fn stage_conflict(
     path: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<ConflictMutationResult, AppError> {
-    state.stage_conflict(&path).await
+    state
+        .logged_user("Stage resolved conflict", state.stage_conflict(&path))
+        .await
 }
 
 #[tauri::command]
@@ -166,7 +204,9 @@ async fn delete_conflict(
     path: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<ConflictMutationResult, AppError> {
-    state.delete_conflict(&path).await
+    state
+        .logged_user("Resolve conflict as deleted", state.delete_conflict(&path))
+        .await
 }
 
 #[tauri::command]
@@ -175,7 +215,9 @@ async fn rename_branch(
     new_name: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<BranchRefMutationResult, AppError> {
-    state.rename_branch(&full_ref, &new_name).await
+    state
+        .logged_user("Rename branch", state.rename_branch(&full_ref, &new_name))
+        .await
 }
 
 #[tauri::command]
@@ -183,7 +225,9 @@ async fn delete_branch(
     full_ref: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<BranchRefMutationResult, AppError> {
-    state.delete_branch(&full_ref).await
+    state
+        .logged_user("Delete branch", state.delete_branch(&full_ref))
+        .await
 }
 
 #[tauri::command]
@@ -196,7 +240,9 @@ async fn create_stash(
     message: Option<String>,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<StashMutationResult, AppError> {
-    state.create_stash(message.as_deref()).await
+    state
+        .logged_user("Create stash", state.create_stash(message.as_deref()))
+        .await
 }
 
 #[tauri::command]
@@ -204,7 +250,9 @@ async fn apply_stash(
     hash: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<StashMutationResult, AppError> {
-    state.apply_stash(&hash).await
+    state
+        .logged_user("Apply stash", state.apply_stash(&hash))
+        .await
 }
 
 #[tauri::command]
@@ -212,7 +260,7 @@ async fn pop_stash(
     hash: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<StashMutationResult, AppError> {
-    state.pop_stash(&hash).await
+    state.logged_user("Pop stash", state.pop_stash(&hash)).await
 }
 
 #[tauri::command]
@@ -220,7 +268,9 @@ async fn drop_stash(
     hash: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<StashMutationResult, AppError> {
-    state.drop_stash(&hash).await
+    state
+        .logged_user("Drop stash", state.drop_stash(&hash))
+        .await
 }
 
 #[tauri::command]
@@ -236,7 +286,10 @@ async fn create_tag(
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<TagMutationResult, AppError> {
     state
-        .create_tag(&name, annotation.as_deref(), target_hash.as_deref())
+        .logged_user(
+            "Create tag",
+            state.create_tag(&name, annotation.as_deref(), target_hash.as_deref()),
+        )
         .await
 }
 
@@ -245,7 +298,9 @@ async fn delete_tag(
     name: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<TagMutationResult, AppError> {
-    state.delete_tag(&name).await
+    state
+        .logged_user("Delete tag", state.delete_tag(&name))
+        .await
 }
 use working_tree::{RemoteKind, RemoteOperationStatus};
 
@@ -301,7 +356,9 @@ async fn create_branch(
     name: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<BranchList, AppError> {
-    state.create_branch(&name).await
+    state
+        .logged_user("Create branch", state.create_branch(&name))
+        .await
 }
 
 #[tauri::command]
@@ -309,7 +366,9 @@ async fn checkout_branch(
     name: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<CheckoutResult, AppError> {
-    state.checkout_branch(&name).await
+    state
+        .logged_user("Checkout", state.checkout_branch(&name))
+        .await
 }
 
 #[tauri::command]
@@ -317,14 +376,228 @@ async fn open_repository(
     path: String,
     state: State<'_, Arc<WorkingTree>>,
     watcher: State<'_, Arc<RepositoryWatchManager>>,
+    workspace: State<'_, Arc<WorkspaceManager>>,
     app: AppHandle,
 ) -> Result<RepositoryInfo, AppError> {
+    let _gate = workspace.gate.lock().await;
+    open_session(&path, &state, &watcher, &app).await
+}
+
+async fn open_session(
+    path: &str,
+    state: &WorkingTree,
+    watcher: &RepositoryWatchManager,
+    app: &AppHandle,
+) -> Result<RepositoryInfo, AppError> {
+    let background = app.state::<Arc<BackgroundFetchManager>>();
+    background.stop(state).await;
     watcher.stop().await;
-    let mut info = state.open(&path).await?;
-    if let Err(error) = watcher.start(&app, Arc::clone(state.inner()), &info).await {
+    let mut info = state.open(path).await?;
+    // The watcher needs the same session owner as Git commands.
+    let tree = app.state::<Arc<WorkingTree>>();
+    if let Err(error) = watcher.start(app, Arc::clone(tree.inner()), &info).await {
         info.watch_warning = Some(error.message);
     }
+    background
+        .activate(app.clone(), Arc::clone(tree.inner()), &info)
+        .await;
     Ok(info)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceTransition {
+    catalog: WorkspaceCatalog,
+    repository: Option<RepositoryInfo>,
+    open_error: Option<AppError>,
+    session_changed: bool,
+}
+
+async fn workspace_session_transition(
+    catalog: WorkspaceCatalog,
+    changed: bool,
+    state: &WorkingTree,
+    watcher: &RepositoryWatchManager,
+    app: &AppHandle,
+) -> WorkspaceTransition {
+    if !changed {
+        return WorkspaceTransition {
+            catalog,
+            repository: None,
+            open_error: None,
+            session_changed: false,
+        };
+    }
+    if let Some(path) = catalog.active_path() {
+        match open_session(path, state, watcher, app).await {
+            Ok(info) => WorkspaceTransition {
+                catalog,
+                repository: Some(info),
+                open_error: None,
+                session_changed: true,
+            },
+            Err(error) => WorkspaceTransition {
+                catalog,
+                repository: None,
+                open_error: Some(error),
+                session_changed: true,
+            },
+        }
+    } else {
+        app.state::<Arc<BackgroundFetchManager>>().stop(state).await;
+        watcher.stop().await;
+        state.close().await;
+        WorkspaceTransition {
+            catalog,
+            repository: None,
+            open_error: None,
+            session_changed: true,
+        }
+    }
+}
+
+#[tauri::command]
+async fn get_workspaces(
+    workspace: State<'_, Arc<WorkspaceManager>>,
+) -> Result<WorkspaceCatalog, AppError> {
+    let _gate = workspace.gate.lock().await;
+    workspace.load()
+}
+
+#[tauri::command]
+async fn restore_workspace_session(
+    workspace: State<'_, Arc<WorkspaceManager>>,
+    state: State<'_, Arc<WorkingTree>>,
+    watcher: State<'_, Arc<RepositoryWatchManager>>,
+    app: AppHandle,
+) -> Result<WorkspaceTransition, AppError> {
+    let _gate = workspace.gate.lock().await;
+    let catalog = workspace.load()?;
+    let changed = catalog.active_path().is_some();
+    Ok(workspace_session_transition(catalog, changed, &state, &watcher, &app).await)
+}
+
+#[tauri::command]
+async fn create_workspace(
+    name: String,
+    workspace: State<'_, Arc<WorkspaceManager>>,
+    state: State<'_, Arc<WorkingTree>>,
+    watcher: State<'_, Arc<RepositoryWatchManager>>,
+    app: AppHandle,
+) -> Result<WorkspaceTransition, AppError> {
+    let _gate = workspace.gate.lock().await;
+    let mut catalog = workspace.load()?;
+    catalog.create(&name)?;
+    workspace.save(&catalog)?;
+    Ok(workspace_session_transition(catalog, true, &state, &watcher, &app).await)
+}
+
+#[tauri::command]
+async fn rename_workspace(
+    id: String,
+    name: String,
+    workspace: State<'_, Arc<WorkspaceManager>>,
+) -> Result<WorkspaceCatalog, AppError> {
+    let _gate = workspace.gate.lock().await;
+    let mut catalog = workspace.load()?;
+    catalog.rename(&id, &name)?;
+    workspace.save(&catalog)?;
+    Ok(catalog)
+}
+
+#[tauri::command]
+async fn delete_workspace(
+    id: String,
+    workspace: State<'_, Arc<WorkspaceManager>>,
+    state: State<'_, Arc<WorkingTree>>,
+    watcher: State<'_, Arc<RepositoryWatchManager>>,
+    app: AppHandle,
+) -> Result<WorkspaceTransition, AppError> {
+    let _gate = workspace.gate.lock().await;
+    let mut catalog = workspace.load()?;
+    let changed = catalog.active_workspace_id.as_deref() == Some(id.as_str());
+    catalog.delete(&id)?;
+    workspace.save(&catalog)?;
+    Ok(workspace_session_transition(catalog, changed, &state, &watcher, &app).await)
+}
+
+#[tauri::command]
+async fn register_workspace_repository(
+    workspace_id: String,
+    path: String,
+    workspace: State<'_, Arc<WorkspaceManager>>,
+    state: State<'_, Arc<WorkingTree>>,
+    watcher: State<'_, Arc<RepositoryWatchManager>>,
+    app: AppHandle,
+) -> Result<WorkspaceTransition, AppError> {
+    let canonical = workspace::canonical_repository_path(&path).await?;
+    let _gate = workspace.gate.lock().await;
+    let mut catalog = workspace.load()?;
+    catalog.add_repository(&workspace_id, canonical)?;
+    workspace.save(&catalog)?;
+    Ok(workspace_session_transition(catalog, true, &state, &watcher, &app).await)
+}
+
+#[tauri::command]
+async fn remove_workspace_repository(
+    workspace_id: String,
+    repository_id: String,
+    workspace: State<'_, Arc<WorkspaceManager>>,
+    state: State<'_, Arc<WorkingTree>>,
+    watcher: State<'_, Arc<RepositoryWatchManager>>,
+    app: AppHandle,
+) -> Result<WorkspaceTransition, AppError> {
+    let _gate = workspace.gate.lock().await;
+    let mut catalog = workspace.load()?;
+    let changed = catalog.active_workspace_id.as_deref() == Some(workspace_id.as_str())
+        && catalog
+            .workspaces
+            .iter()
+            .find(|item| item.id == workspace_id)
+            .and_then(|item| item.active_repository_id.as_deref())
+            == Some(repository_id.as_str());
+    catalog.remove_repository(&workspace_id, &repository_id)?;
+    workspace.save(&catalog)?;
+    Ok(workspace_session_transition(catalog, changed, &state, &watcher, &app).await)
+}
+
+#[tauri::command]
+async fn switch_workspace(
+    id: String,
+    workspace: State<'_, Arc<WorkspaceManager>>,
+    state: State<'_, Arc<WorkingTree>>,
+    watcher: State<'_, Arc<RepositoryWatchManager>>,
+    app: AppHandle,
+) -> Result<WorkspaceTransition, AppError> {
+    let _gate = workspace.gate.lock().await;
+    let mut catalog = workspace.load()?;
+    let changed = catalog.active_workspace_id.as_deref() != Some(id.as_str());
+    catalog.select_workspace(&id)?;
+    workspace.save(&catalog)?;
+    Ok(workspace_session_transition(catalog, changed, &state, &watcher, &app).await)
+}
+
+#[tauri::command]
+async fn switch_workspace_repository(
+    workspace_id: String,
+    repository_id: String,
+    workspace: State<'_, Arc<WorkspaceManager>>,
+    state: State<'_, Arc<WorkingTree>>,
+    watcher: State<'_, Arc<RepositoryWatchManager>>,
+    app: AppHandle,
+) -> Result<WorkspaceTransition, AppError> {
+    let _gate = workspace.gate.lock().await;
+    let mut catalog = workspace.load()?;
+    let changed = catalog.active_workspace_id.as_deref() != Some(workspace_id.as_str())
+        || catalog
+            .workspaces
+            .iter()
+            .find(|item| item.id == workspace_id)
+            .and_then(|item| item.active_repository_id.as_deref())
+            != Some(repository_id.as_str());
+    catalog.select_repository(&workspace_id, &repository_id)?;
+    workspace.save(&catalog)?;
+    Ok(workspace_session_transition(catalog, changed, &state, &watcher, &app).await)
 }
 
 #[tauri::command]
@@ -389,7 +662,9 @@ async fn stage_file(
     old_path: Option<String>,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<RepositoryStatus, AppError> {
-    state.stage_file(&path, old_path.as_deref()).await
+    state
+        .logged_user("Stage file", state.stage_file(&path, old_path.as_deref()))
+        .await
 }
 
 #[tauri::command]
@@ -398,17 +673,22 @@ async fn unstage_file(
     old_path: Option<String>,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<RepositoryStatus, AppError> {
-    state.unstage_file(&path, old_path.as_deref()).await
+    state
+        .logged_user(
+            "Unstage file",
+            state.unstage_file(&path, old_path.as_deref()),
+        )
+        .await
 }
 
 #[tauri::command]
 async fn stage_all(state: State<'_, Arc<WorkingTree>>) -> Result<RepositoryStatus, AppError> {
-    state.stage_all().await
+    state.logged_user("Stage all", state.stage_all()).await
 }
 
 #[tauri::command]
 async fn unstage_all(state: State<'_, Arc<WorkingTree>>) -> Result<RepositoryStatus, AppError> {
-    state.unstage_all().await
+    state.logged_user("Unstage all", state.unstage_all()).await
 }
 
 #[tauri::command]
@@ -418,7 +698,12 @@ async fn partial_stage(
     selection: PartialSelection,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<working_tree::PartialStageResult, AppError> {
-    state.partial_stage(&path, staged, selection).await
+    state
+        .logged_user(
+            "Partial stage",
+            state.partial_stage(&path, staged, selection),
+        )
+        .await
 }
 
 #[tauri::command]
@@ -426,7 +711,7 @@ async fn commit_staged(
     message: String,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<CommitResult, AppError> {
-    state.commit(&message).await
+    state.logged_user("Commit", state.commit(&message)).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -434,8 +719,24 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(WorkingTree::default()))
+        .manage(Arc::new(BackgroundFetchManager::default()))
         .manage(Arc::new(RepositoryWatchManager::default()))
+        .setup(|app| {
+            let config = app.path().app_config_dir()?;
+            app.manage(Arc::new(WorkspaceManager::new(config)));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            get_operation_history,
+            get_workspaces,
+            restore_workspace_session,
+            create_workspace,
+            rename_workspace,
+            delete_workspace,
+            register_workspace_repository,
+            remove_workspace_repository,
+            switch_workspace,
+            switch_workspace_repository,
             get_repository_state,
             revalidate_repository,
             get_conflict_content,

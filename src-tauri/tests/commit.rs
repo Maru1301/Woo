@@ -4,7 +4,11 @@ use std::{
     process::{Command, Output},
 };
 use tempfile::TempDir;
-use woo_lib::{git::GitRunner, working_tree::WorkingTree};
+use woo_lib::{
+    git::GitRunner,
+    operation_log::{OperationPhase, OperationSource},
+    working_tree::WorkingTree,
+};
 
 fn git_output(path: &Path, args: &[&str]) -> Output {
     Command::new("git")
@@ -56,6 +60,25 @@ async fn opened(fixture: &TempDir) -> WorkingTree {
     let tree = WorkingTree::default();
     tree.open(fixture.path().to_str().unwrap()).await.unwrap();
     tree
+}
+
+#[tokio::test]
+async fn semantic_user_operations_are_logged_once_without_internal_git_reads() {
+    let fixture = fixture();
+    fs::write(fixture.path().join("first.txt"), "first").unwrap();
+    let tree = opened(&fixture).await;
+    tree.logged_user("Stage file", tree.stage_file("first.txt", None))
+        .await
+        .unwrap();
+    tree.logged_user("Commit", tree.commit("Initial commit"))
+        .await
+        .unwrap();
+    let history = tree.operation_history().await;
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].kind, "Commit");
+    assert_eq!(history[0].source, OperationSource::User);
+    assert_eq!(history[0].phase, OperationPhase::Completed);
+    assert_eq!(history[1].kind, "Stage file");
 }
 
 #[tokio::test]

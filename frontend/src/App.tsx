@@ -7,17 +7,23 @@ import BranchPanel from "./features/branches/BranchPanel";
 import StashPanel from "./features/stash/StashPanel";
 import TagPanel from "./features/tags/TagPanel";
 import MergePanel from "./features/operations/MergePanel";
+import OperationHistory from "./features/operations/OperationHistory";
 import DiffViewer, { type DiffSource } from "./features/diff/DiffViewer";
 import { useRepositorySession } from "./app/repository-session/useRepositorySession";
 import { FileGroup } from "./features/changes/FileGroup";
 import { WorkspaceLayout, type WorkspaceView } from "./layout/WorkspaceLayout";
+import { WorkspacePanel } from "./features/workspace/WorkspacePanel";
+import { createWorkspace, deleteWorkspace, registerRepository, removeRepository, renameWorkspace, restoreWorkspaceSession, switchWorkspace, switchWorkspaceRepository, type WorkspaceCatalog, type WorkspaceTransition } from "./features/workspace/workspace";
 import {
-  checkoutBranch, commitStaged, createBranch, deleteBranch, errorCode, getBranches, getRepositoryState, messageForError, openRepository, partialStage, renameBranch, revalidateRepository, stageAll, stageFile,
+  checkoutBranch, commitStaged, createBranch, deleteBranch, errorCode, getBranches, getRepositoryState, messageForError, partialStage, renameBranch, revalidateRepository, stageAll, stageFile,
   cherryPick, resetTo, revertCommit, unstageAll, unstageFile, type AutoRefreshEvent, type ConflictMutationResult, type FileChange, type HistoryMutationResult, type MergeMutationResult, type PartialSelection, type PartialStageResult, type RemoteRefresh, type RepositoryState, type RepositoryStatus, type ResetMode, type StashMutationResult,
 } from "./lib/repository";
 
 export default function App() {
   const [path, setPath] = useState("");
+  const [workspaceCatalog, setWorkspaceCatalog] = useState<WorkspaceCatalog | null>(null);
+  const [workspaceError, setWorkspaceError] = useState("");
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
   const [activeView, setActiveView] = useState<WorkspaceView>("history");
   const [showOpen, setShowOpen] = useState(true);
   const [session, dispatchSession] = useRepositorySession();
@@ -41,10 +47,13 @@ export default function App() {
   const managementBusyRef = useRef(0);
   const [sessionVersion, setSessionVersion] = useState(0);
   const branchRequest = useRef(0);
+  const repositoryRequest = useRef(0);
+  const restoreStarted = useRef(false);
   const busyRef = useRef(false);
   const repositoryRef = useRef(repository);
   const lastWatchSequence = useRef(0);
   const pendingWatch = useRef<AutoRefreshEvent | null>(null);
+  const pendingBackgroundRefresh = useRef(false);
   const remoteBusyRef = useRef(remoteBusy);
   repositoryRef.current = repository;
   remoteBusyRef.current = remoteBusy;
@@ -101,8 +110,20 @@ export default function App() {
     return () => { cancelled = true; unlisten?.(); };
   }, []);
   useEffect(() => {
-    if (busy || managementBusy || remoteBusy || !pendingWatch.current) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void listen<{ sessionId: number; operationId: number; refresh: RemoteRefresh | null }>("background-fetch-completed", ({ payload }) => {
+      if (repositoryRef.current?.sessionId !== payload.sessionId || !payload.refresh) return;
+      if (busyRef.current || managementBusyRef.current > 0 || remoteBusyRef.current) {
+        pendingBackgroundRefresh.current = true;
+      } else applyRemoteRefresh(payload.refresh);
+    }).then((stop) => { if (cancelled) stop(); else unlisten = stop; }).catch(() => {});
+    return () => { cancelled = true; unlisten?.(); };
+  }, []);
+  useEffect(() => {
+    if (busy || managementBusy || remoteBusy || (!pendingWatch.current && !pendingBackgroundRefresh.current)) return;
     pendingWatch.current = null;
+    pendingBackgroundRefresh.current = false;
     void revalidateRepository();
   }, [busy, managementBusy, remoteBusy]);
 
@@ -123,15 +144,14 @@ export default function App() {
     }
   }
 
-  async function loadRepository(selectedPath: string) {
-    if (!selectedPath.trim() || busyRef.current || managementBusyRef.current > 0 || remoteBusy) return;
-    busyRef.current = true;
-    setBusy("Opening repository");
-    setOpenError("");
+  function resetRepositorySession() {
+    repositoryRequest.current += 1;
+    setPath("");
     repositoryRef.current = null;
     dispatchSession({ type: "reset" });
     lastWatchSequence.current = 0;
     pendingWatch.current = null;
+    pendingBackgroundRefresh.current = false;
     setRemoteBusy(false);
     setManagementBusy(false);
     branchRequest.current += 1;
@@ -141,30 +161,72 @@ export default function App() {
     setCommitError("");
     setCommitNotice("");
     setHistoryActionError(""); setHistoryActionNotice("");
+  }
+
+  async function attachRepository(info: NonNullable<WorkspaceTransition["repository"]>) {
+    const request = repositoryRequest.current;
+    repositoryRef.current = info;
+    dispatchSession({ type: "opened", repository: info });
+    setShowOpen(false);
+    setActiveView("history");
+    setSessionVersion((value) => value + 1);
+    setHistoryVersion((value) => value + 1);
+    void loadBranches();
+    setPath(info.path);
+    dispatchSession({ type: "statusLoading" });
+    const statusSequence = lastWatchSequence.current;
     try {
-      const info = await openRepository(selectedPath.trim());
-      repositoryRef.current = info;
-      dispatchSession({ type: "opened", repository: info });
-      setShowOpen(false);
-      setActiveView("history");
-      setSessionVersion((value) => value + 1);
-      setHistoryVersion((value) => value + 1);
-      void loadBranches();
-      setPath(info.path);
-      dispatchSession({ type: "statusLoading" });
-      const statusSequence = lastWatchSequence.current;
-      try {
-        const initialState = await getRepositoryState();
-        if (statusSequence === lastWatchSequence.current) applyRepositoryState(initialState);
-      } catch (cause) {
-        if (statusSequence === lastWatchSequence.current) dispatchSession({ type: "statusError", message: messageForError(cause) });
-      }
+      const initialState = await getRepositoryState();
+      if (request === repositoryRequest.current && statusSequence === lastWatchSequence.current) applyRepositoryState(initialState);
     } catch (cause) {
-      setOpenError(messageForError(cause));
+      if (request === repositoryRequest.current && statusSequence === lastWatchSequence.current) dispatchSession({ type: "statusError", message: messageForError(cause) });
+    }
+  }
+
+  async function runWorkspaceTransition(label: string, action: () => Promise<WorkspaceTransition>) {
+    if (busyRef.current || managementBusyRef.current > 0 || remoteBusy) return;
+    busyRef.current = true;
+    setWorkspaceBusy(true);
+    setBusy(label);
+    setWorkspaceError("");
+    setOpenError("");
+    try {
+      const result = await action();
+      setWorkspaceCatalog(result.catalog);
+      if (result.sessionChanged) {
+        resetRepositorySession();
+        if (result.repository) await attachRepository(result.repository);
+        else { setShowOpen(true); if (result.openError) setOpenError(result.openError.message); }
+      } else if (result.openError) setOpenError(result.openError.message);
+    } catch (cause) {
+      setWorkspaceError(messageForError(cause));
     } finally {
       busyRef.current = false;
+      setWorkspaceBusy(false);
       setBusy(null);
     }
+  }
+
+  useEffect(() => {
+    if (restoreStarted.current) return;
+    restoreStarted.current = true;
+    void runWorkspaceTransition("Restoring workspace", restoreWorkspaceSession);
+  }, []);
+
+  async function loadRepository(selectedPath: string) {
+    const workspaceId = workspaceCatalog?.activeWorkspaceId;
+    if (!selectedPath.trim() || !workspaceId) return;
+    await runWorkspaceTransition("Adding repository", () => registerRepository(workspaceId, selectedPath.trim()));
+  }
+
+  async function renameCurrentWorkspace(id: string, name: string) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setWorkspaceBusy(true);
+    setWorkspaceError("");
+    try { setWorkspaceCatalog(await renameWorkspace(id, name)); }
+    catch (cause) { setWorkspaceError(messageForError(cause)); }
+    finally { busyRef.current = false; setWorkspaceBusy(false); }
   }
 
   async function chooseRepository() {
@@ -363,6 +425,7 @@ export default function App() {
     if (result.clearDiff) setSelectedChange(null);
     if (result.resetHistory) setHistoryVersion((value) => value + 1);
     else if (result.refreshHistory) setHistoryRefreshVersion((value) => value + 1);
+    if (result.refreshHistory) setTagRefreshVersion((value) => value + 1);
   }
 
   function applyMergeResult(result: MergeMutationResult) {
@@ -420,13 +483,20 @@ export default function App() {
 
   return <WorkspaceLayout repository={repository} repositoryError={status.phase === "error" ? status.message : undefined} activeView={activeView} onViewChange={(view) => { setShowOpen(false); setActiveView(view); }} onOpen={() => setShowOpen(true)} openDisabled={controlsBusy} changeCount={changeCount} busy={busy} remoteControls={repository && <RemotePanel key={`${repository.path}:${sessionVersion}`} onComplete={applyRemoteRefresh} onInconsistent={inconsistentManagement} onBusyChange={setRemoteBusy} localBusy={!!busy || managementBusy || repositoryMutationDisabled} />} sidebar={repository && <BranchPanel compact state={branches} currentBranch={repository.branch} busy={controlsBusy || repositoryMutationDisabled} onCreate={createLocalBranch} onCheckout={(name) => void switchBranch(name)} onRename={(ref, name) => changeBranchRef(`Renaming ${ref}`, () => renameBranch(ref, name))} onDelete={(ref) => changeBranchRef(`Deleting ${ref}`, () => deleteBranch(ref))} onRetry={() => void loadBranches()} error={branchError} />}>
     {(!repository || showOpen) && <div className="woo-open-view">
-      <div className="intro"><p className="eyebrow">YOUR WORKSPACE</p><h1>Open a repository</h1><p>Inspect changes and prepare files for your next commit.</p></div>
-      <div className="open-panel">
-        <label htmlFor="repo-path">Repository path</label>
+        <div className="intro"><p className="eyebrow">YOUR WORKSPACE</p><h1>Workspaces and repositories</h1><p>Choose one active repository. Git state loads only for that repository.</p></div>
+        <WorkspacePanel catalog={workspaceCatalog} busy={workspaceBusy || controlsBusy} error={workspaceError}
+          onCreate={(name) => void runWorkspaceTransition("Creating workspace", () => createWorkspace(name))}
+          onRename={(id, name) => void renameCurrentWorkspace(id, name)}
+          onDelete={(id) => void runWorkspaceTransition("Deleting workspace", () => deleteWorkspace(id))}
+          onSwitch={(id) => void runWorkspaceTransition("Switching workspace", () => switchWorkspace(id))}
+          onSelectRepository={(workspaceId, repositoryId) => void runWorkspaceTransition("Switching repository", () => switchWorkspaceRepository(workspaceId, repositoryId))}
+          onRemoveRepository={(workspaceId, repositoryId) => void runWorkspaceTransition("Removing repository", () => removeRepository(workspaceId, repositoryId))} />
+        <div className="open-panel">
+          <label htmlFor="repo-path">Add repository to active workspace</label>
         <div className="path-controls">
           <input id="repo-path" value={path} onChange={(event) => setPath(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void loadRepository(path); }} placeholder="C:\\path\\to\\repository" disabled={!!busy} />
           <button className="secondary" onClick={() => void chooseRepository()} disabled={!!busy}>Browse…</button>
-          <button onClick={() => void loadRepository(path)} disabled={!!busy || !path.trim()}>{busy === "Opening repository" ? "Opening…" : "Open"}</button>
+          <button onClick={() => void loadRepository(path)} disabled={!!busy || !path.trim() || !workspaceCatalog?.activeWorkspaceId}>{busy === "Adding repository" ? "Adding…" : "Add and open"}</button>
         </div>
         {openError && <p className="error" role="alert">{openError}</p>}
       </div>
@@ -446,6 +516,7 @@ export default function App() {
         <MergePanel key={`merge:${repository.path}:${sessionVersion}`} branches={branches.phase === "ready" ? branches.data.branches : []} operation={operation} conflicts={conflicts} busy={controlsBusy || status.phase !== "ready"} refreshToken={conflictVersion} onBusyChange={managementBusyChanged} onMerge={applyMergeResult} onHistory={applyHistoryResult} onConflict={applyConflictResult} onInconsistent={inconsistentManagement} />
         <StashPanel key={`stash:${repository.path}:${sessionVersion}`} busy={controlsBusy || repositoryMutationDisabled} onBusyChange={managementBusyChanged} onMutation={applyStashMutation} onInconsistent={inconsistentManagement} />
         <TagPanel key={`tag:${repository.path}:${sessionVersion}`} refreshToken={tagRefreshVersion} busy={controlsBusy || repositoryMutationDisabled} onBusyChange={managementBusyChanged} onMutation={() => setHistoryRefreshVersion((value) => value + 1)} onInconsistent={inconsistentManagement} />
+        <OperationHistory active={!showOpen && activeView === "manage"} />
         </div>
         <section className="changes-panel woo-view" aria-label="Working tree changes" hidden={showOpen || activeView !== "changes"}>
           <div className="woo-changes-list">

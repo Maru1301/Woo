@@ -1,6 +1,6 @@
 # Woo
 
-Woo is an independent desktop Git client built with Tauri 2, Rust, React, and TypeScript. It opens a local working-tree repository, supports staging and commits, browses paged commit history and its commit graph, displays on-demand text diffs, manages local branches with safe checkout, and runs fetch, pull, and push through system Git. Remote-tracking branches are displayed from local refs and update after fetch.
+Woo is an independent desktop Git client built with Tauri 2, Rust, React, and TypeScript. Workspaces organize local repositories while one Git repository is active at a time. Woo supports staging and commits, browses paged commit history and its commit graph, displays on-demand text diffs, manages local branches with safe checkout, and runs fetch, pull, and push through system Git. Remote-tracking branches are displayed from local refs and update after fetch.
 
 ## Development
 

@@ -37,8 +37,10 @@ export interface RemoteInfo { name: string; fetchUrl: string | null; pushUrl: st
 export interface RemoteList { remotes: RemoteInfo[] }
 export interface RemoteRefresh { branches: BranchList; head: HeadInfo | null; status: RepositoryStatus | null; operation: RepositoryOperation | null; conflicts: ConflictFile[] | null; resetHistory: boolean; refreshHistory: boolean; clearDiff: boolean }
 export type RemoteKind = "fetch" | "pull" | "push";
-export type RemotePhase = "queued" | "running" | "completed" | "failed" | "cancelled";
-export interface RemoteOperationStatus { id: number; kind: RemoteKind; phase: RemotePhase; startedAtMs: number; elapsedMs: number; gitDurationMs: number | null; refreshDurationMs: number | null; refresh: RemoteRefresh | null; error: AppError | null }
+export type RemotePhase = "queued" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
+export interface RemoteOperationStatus { id: number; sessionId: number; source: "user" | "background"; kind: RemoteKind; phase: RemotePhase; startedAtMs: number; elapsedMs: number; gitDurationMs: number | null; refreshDurationMs: number | null; refresh: RemoteRefresh | null; error: AppError | null }
+export interface OperationEntry { id: number; repositoryId: string; kind: string; source: "user" | "background"; startedAtMs: number; finishedAtMs: number | null; durationMs: number | null; phase: "running" | "completed" | "failed" | "cancelled" | "timed_out"; summary: string; diagnostics: string | null }
+export function getOperationHistory(): Promise<OperationEntry[]> { return invoke<OperationEntry[]>("get_operation_history"); }
 export interface CommitInfo { hash: string; parentHashes: string[]; authorName: string; authorEmail: string; timestamp: string; subject: string; refs: string[] }
 export interface GraphRow { nodeLane: number; laneCount: number; incoming: boolean; continuations: number[]; parentLanes: number[] }
 export interface CommitHistoryPage { commits: CommitInfo[]; graphRows: GraphRow[]; nextCursor: string | null; hasMore: boolean }

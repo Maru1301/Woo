@@ -14,12 +14,11 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
-tokio = { version = "1", features = ["process", "time", "macros", "rt-multi-thread", "sync", "io-util"] }
+tokio = { version = "1", features = ["process", "time", "macros", "rt-multi-thread", "sync", "io-util", "test-util"] }
 tempfile = "3"
 sha2 = "0.10"
 notify = "8.2"
-
-[dev-dependencies]
-serde_json = "1"
+dunce = "1"

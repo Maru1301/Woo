@@ -9,6 +9,20 @@ use tokio::{
     time::timeout,
 };
 
+/// Keep Woo-owned console executables invisible when launched by the Windows
+/// release GUI process. Tokio's Command exposes the Windows creation flags
+/// directly; all Git execution paths (and the cancellation helper) use this
+/// factory so new commands inherit the same policy.
+fn desktop_child(executable: &str) -> Command {
+    let mut command = Command::new(executable);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 #[derive(Debug)]
 pub struct GitOutput {
     pub stdout: Vec<u8>,
@@ -60,7 +74,7 @@ impl GitRunner {
         max_duration: Option<Duration>,
     ) -> Result<GitOutput, GitRunError> {
         let started = Instant::now();
-        let mut command = Command::new("git");
+        let mut command = desktop_child("git");
         command
             .args(args)
             .current_dir(directory)
@@ -147,7 +161,7 @@ impl GitRunner {
         input: Option<&[u8]>,
     ) -> Result<GitOutput, GitRunError> {
         let started = Instant::now();
-        let mut command = Command::new("git");
+        let mut command = desktop_child("git");
         command
             .args(args)
             .current_dir(directory)
@@ -209,7 +223,7 @@ impl GitRunner {
         max_stdout: usize,
     ) -> Result<GitOutput, GitRunError> {
         let started = Instant::now();
-        let mut command = Command::new("git");
+        let mut command = desktop_child("git");
         command
             .args(args)
             .current_dir(directory)
@@ -285,7 +299,7 @@ async fn terminate_remote_child(child: &mut tokio::process::Child) -> Result<(),
         // leaves descendants holding pipe handles and can strand the operation.
         let _ = tokio::time::timeout(
             Duration::from_secs(5),
-            Command::new("taskkill")
+            desktop_child("taskkill")
                 .args(["/PID", &pid.to_string(), "/T", "/F"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -314,4 +328,42 @@ async fn capture_bounded(
         output.extend_from_slice(&buffer[..read.min(remaining)]);
     }
     Ok(output)
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetConsoleWindow() -> *mut std::ffi::c_void;
+    }
+
+    #[test]
+    fn console_probe_child() {
+        if std::env::var_os("WOO_CONSOLE_PROBE").is_some() {
+            // This test binary is itself a console executable. A child created
+            // with CREATE_NO_WINDOW must have no attached console even then.
+            println!("console={}", unsafe { !GetConsoleWindow().is_null() });
+        }
+    }
+
+    #[tokio::test]
+    async fn desktop_child_has_no_console_and_keeps_stdout() {
+        let output = desktop_child(std::env::current_exe().unwrap().to_str().unwrap())
+            .args([
+                "--exact",
+                "git::windows_tests::console_probe_child",
+                "--nocapture",
+            ])
+            .env("WOO_CONSOLE_PROBE", "1")
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("console=false"),
+            "{output:?}"
+        );
+    }
 }

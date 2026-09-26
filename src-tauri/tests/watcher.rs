@@ -36,6 +36,22 @@ fn fixture() -> TempDir {
 }
 
 #[tokio::test]
+async fn watcher_session_survives_woo_mutation_then_external_edit() {
+    let dir = fixture();
+    let tree = WorkingTree::default();
+    let opened = tree.open(dir.path().to_str().unwrap()).await.unwrap();
+    fs::write(dir.path().join("file.txt"), "internal\n").unwrap();
+    tree.stage_file("file.txt", None).await.unwrap();
+    tree.commit("internal change").await.unwrap();
+    fs::write(dir.path().join("file.txt"), "external\n").unwrap();
+    let snapshot = tree
+        .watch_snapshot(opened.session_id, true, false, false, None)
+        .await
+        .unwrap();
+    assert_eq!(snapshot.state.unwrap().status.unstaged[0].path, "file.txt");
+}
+
+#[tokio::test]
 async fn external_edit_add_commit_and_refs_are_revalidated() {
     let dir = fixture();
     let tree = WorkingTree::default();
