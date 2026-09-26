@@ -4,7 +4,7 @@ import {
   saveConflictText, stageConflict, useConflictSide,
   type BranchInfo, type ConflictContent, type ConflictFile, type ConflictMutationResult,
   type HistoryMutationResult, type MergeMutationResult, type RepositoryOperation,
-} from "./lib/repository";
+} from "../../lib/repository";
 
 function preview(part: ConflictContent["ours"], label: string) {
   if (!part) return <p className="conflict-unavailable">{label} does not contain this file.</p>;

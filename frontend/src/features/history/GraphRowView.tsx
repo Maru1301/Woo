@@ -1,4 +1,4 @@
-import type { GraphRow } from "./lib/repository";
+import type { GraphRow } from "../../lib/repository";
 
 export const GRAPH_ROW_HEIGHT = 68;
 const LANE_WIDTH = 18;

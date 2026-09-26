@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import DiffViewer from "./DiffViewer";
+import DiffViewer from "../diff/DiffViewer";
 import GraphRowView, { GRAPH_ROW_HEIGHT, graphWidth } from "./GraphRowView";
-import { getCommitFiles, getCommitHistory, messageForError, type CommitHistoryPage, type CommitInfo, type FileChange, type GraphRow, type ResetMode } from "./lib/repository";
+import { getCommitFiles, getCommitHistory, messageForError, type CommitHistoryPage, type CommitInfo, type FileChange, type GraphRow, type ResetMode } from "../../lib/repository";
 
 const ROW_HEIGHT = GRAPH_ROW_HEIGHT;
 const DEFAULT_VIEW_HEIGHT = 400;

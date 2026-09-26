@@ -2,10 +2,12 @@ import { createServer } from "vite";
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 
-const vite = await createServer({ optimizeDeps: { noDiscovery: true, entries: [] }, server: { middlewareMode: true }, appType: "custom" });
+const frontendRoot = fileURLToPath(new URL("../frontend/", import.meta.url));
+const vite = await createServer({ root: frontendRoot, optimizeDeps: { noDiscovery: true, entries: [] }, server: { middlewareMode: true }, appType: "custom" });
 try {
-  const { default: GraphRowView, GRAPH_ROW_HEIGHT, graphWidth } = await vite.ssrLoadModule("/src/GraphRowView.tsx");
+  const { default: GraphRowView, GRAPH_ROW_HEIGHT, graphWidth } = await vite.ssrLoadModule("/src/features/history/GraphRowView.tsx");
   const count = 10_000;
   const viewport = 400;
   const overscan = 5;

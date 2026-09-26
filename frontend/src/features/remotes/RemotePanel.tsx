@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { cancelRemoteOperation, getRemoteOperation, getRemotes, messageForError, startFetch, startPull, startPush, type RemoteInfo, type RemoteKind, type RemoteOperationStatus, type RemoteRefresh } from "./lib/repository";
+import { cancelRemoteOperation, getRemoteOperation, getRemotes, messageForError, startFetch, startPull, startPush, type RemoteInfo, type RemoteKind, type RemoteOperationStatus, type RemoteRefresh } from "../../lib/repository";
 
 export default function RemotePanel({ onComplete, onInconsistent, onBusyChange, localBusy }: {
   onComplete: (refresh: RemoteRefresh) => void;

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getCommitDiff, getStagedDiff, getUnstagedDiff, getUntrackedDiff, messageForError, type DiffFile, type DiffLine, type FileChange, type PartialSelection, type PartialStageResult } from "./lib/repository";
+import { getCommitDiff, getStagedDiff, getUnstagedDiff, getUntrackedDiff, messageForError, type DiffFile, type DiffLine, type FileChange, type PartialSelection, type PartialStageResult } from "../../lib/repository";
 
 export type DiffSource = "unstaged" | "staged" | "untracked" | "commit";
 const ROW_HEIGHT = 26;

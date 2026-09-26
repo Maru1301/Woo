@@ -20,4 +20,16 @@ npm run build
 cd src-tauri && cargo test
 ```
 
-See [architecture](docs/architecture/overview.md), [performance plan](docs/performance/benchmark-plan.md), and [handoff](docs/handoff.md).
+See the [documentation index](docs/README.md) for architecture, performance notes, decisions, prototypes, and handoff.
+
+## Project layout
+
+```text
+frontend/             React application, feature panels, Vite and TypeScript settings
+src-tauri/            Tauri application, Rust Git logic and integration tests
+scripts/              Project-level launch and benchmark scripts
+docs/                 Architecture, decisions, performance notes and handoff
+docs/prototypes/      Standalone UI reference prototypes
+```
+
+The root `package.json` keeps `npm run tauri dev` and `npm run build` working from the repository directory. The frontend package is `frontend/package.json`; install dependencies from the root with `npm install`.

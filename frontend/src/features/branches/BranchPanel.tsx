@@ -1,6 +1,6 @@
 import { useState } from "react";
-import type { BranchInfo, BranchList } from "./lib/repository";
-import type { LoadState } from "./app/repository-session/useRepositorySession";
+import type { BranchInfo, BranchList } from "../../lib/repository";
+import type { LoadState } from "../../app/repository-session/useRepositorySession";
 
 export type BranchState = LoadState<BranchList>;
 

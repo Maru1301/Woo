@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { applyStash, createStash, dropStash, getStashes, messageForError, popStash, type StashList, type StashMutationResult } from "./lib/repository";
+import { applyStash, createStash, dropStash, getStashes, messageForError, popStash, type StashList, type StashMutationResult } from "../../lib/repository";
 
 export default function StashPanel({ busy, onBusyChange, onMutation, onInconsistent }: {
   busy: boolean;

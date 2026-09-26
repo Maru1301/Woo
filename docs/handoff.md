@@ -1,5 +1,9 @@
 ﻿# Handoff
 
+## Project layout update
+
+The React package and entry point now live in `frontend/`; root npm scripts remain stable workspace entry points for Tauri and frontend builds. Panels formerly beside `App.tsx` moved into `frontend/src/features/{history,diff,branches,remotes,stash,tags,operations}/`. The standalone UI reference moved to `docs/prototypes/woo-ui-prototype-05.html`; `docs/README.md` indexes current documentation. Historical milestone file paths below describe their locations at the time and are not current paths. Feature behavior and Rust boundaries are unchanged. `npm run build`, the graph-render diagnostic, `npm run tauri -- build --no-bundle`, and `git diff --check` passed after the move. Rust tests were not rerun because Rust source was unchanged; the Tauri release build compiled successfully.
+
 ## Foundation F1 — repository auto refresh
 
 Core Feature Development: **FROZEN**. F1 adds no Git workflow. Next phase: **F2 / UI/UX Polish**.

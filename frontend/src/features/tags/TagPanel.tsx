@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { createTag, deleteTag, getTags, messageForError, type TagList, type TagMutationResult } from "./lib/repository";
+import { createTag, deleteTag, getTags, messageForError, type TagList, type TagMutationResult } from "../../lib/repository";
 
 export default function TagPanel({ busy, onBusyChange, onMutation, onInconsistent, refreshToken = 0 }: {
   busy: boolean;
