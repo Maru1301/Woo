@@ -39,3 +39,61 @@ html,body,#root{height:100%;min-height:0}body{min-width:0;overflow:hidden}
 .operation-history-list li div { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
 .operation-history-list small { opacity: .7; }
 .operation-history-list p { margin: 4px 0 0; }
+
+/* Prototype 07 hierarchy: workspace controls above tabs, repository navigation at left. */
+.woo-shell{grid-template-rows:44px 38px minmax(0,1fr) 25px}
+.woo-topbar{height:44px;padding:0 10px}
+.woo-topbar .brand{font-weight:800;margin-right:10px}
+.woo-workspace-selector,.woo-activity-anchor{position:relative}
+.woo-workspace-selector>button{min-width:190px;text-align:left}
+.woo-workspace-menu{position:absolute;top:35px;left:0;z-index:45;width:min(440px,calc(100vw - 20px));max-height:calc(100vh - 100px);overflow:auto;padding:8px;border:1px solid #3a495d;border-radius:8px;background:#17212d;box-shadow:0 16px 40px #000a}
+.woo-workspace-menu .workspace-registry{margin:0;padding:6px;border:0;background:transparent;box-shadow:none}
+.woo-workspace-menu .workspace-repository{min-width:0}
+.woo-workspace-menu .workspace-repository>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.woo-activity-popover{position:absolute;top:35px;right:0;z-index:45;width:min(360px,calc(100vw - 20px));max-height:min(440px,calc(100vh - 90px));overflow:auto;background:#17212d;border:1px solid #3a495d;border-radius:8px;box-shadow:0 16px 40px #000a}
+.woo-activity-popover .operation-history{padding:10px;border:0;background:transparent}
+.woo-activity-popover .operation-history-list{max-height:320px}
+.woo-settings-button{width:auto;height:auto;padding:5px 9px!important;font-size:12px!important}
+.woo-tabs{height:38px;overflow-x:auto;overflow-y:hidden;align-items:end;gap:2px}
+.woo-repo-tab{flex:none;border:1px solid transparent;border-bottom:0;background:transparent;color:#92a0b2;cursor:pointer}
+.woo-repo-tab.active{border-color:var(--woo-line);background:#18212d;color:#fff}
+.woo-tab-add{flex:none;min-width:36px;height:29px;padding:0 8px;border:0;background:transparent;color:#a7b8cc}
+.woo-main{grid-template-columns:220px minmax(0,1fr)}
+.woo-sidebar{display:flex;flex-direction:column;overflow:auto}
+.woo-sidebar-label{margin:12px 9px 5px;color:#718095;font-size:10px;letter-spacing:.12em;text-transform:uppercase}
+.woo-nav-bottom{margin-top:auto;padding-top:8px;border-top:1px solid var(--woo-line)}
+.woo-sidebar .branches-panel{margin:0;padding:0}
+.woo-sidebar .branches-heading,.woo-sidebar .branch-current,.woo-sidebar .branch-row code,.woo-sidebar .branch-row .branch-upstream{display:none}
+.woo-sidebar .branch-groups{gap:4px}
+.woo-sidebar .branch-group h3{padding:4px 9px;color:#8190a4}
+.woo-sidebar .branch-scroll{max-height:160px}
+.woo-sidebar .branch-row{height:42px;border:0}
+.woo-sidebar .branch-row button{font-size:10px}
+.woo-view[hidden],.woo-open-view[hidden]{display:none!important}
+.woo-file-view-toggle{display:inline-flex;margin-left:auto;gap:0;white-space:nowrap}
+.woo-file-view-toggle button{padding:3px 9px;border:1px solid #344256;border-radius:0;background:#17212d;color:#aab9c9;font-size:11px}
+.woo-file-view-toggle button:first-child{border-radius:5px 0 0 5px}.woo-file-view-toggle button:last-child{border-radius:0 5px 5px 0}
+.woo-file-view-toggle button.active{background:#294866;color:#fff}
+.woo-file-scroll{position:relative;overflow:auto;scrollbar-color:#34465c var(--woo-panel)}
+.woo-file-spacer{position:relative}
+.woo-file-row{position:absolute;left:0;right:0;display:flex;align-items:center;gap:7px;border-bottom:1px solid #202a37;min-width:0;padding-right:8px}
+.woo-file-row:hover,.woo-file-row.selected{background:#1a2b40}
+.woo-file-row.directory{background:#131e29;color:#91a7bd;font-size:11px}
+.woo-file-select{display:flex;align-items:center;gap:8px;flex:1;min-width:0;height:100%;padding:0;border:0;background:transparent;text-align:left;color:inherit}
+.woo-file-kind{flex:none;width:16px;font-size:12px;font-weight:700;color:#e2bf68}
+.woo-file-kind.kind-added,.woo-file-kind.kind-untracked{color:#75d5a0}.woo-file-kind.kind-deleted{color:#f0a0a2}
+.woo-file-text{display:flex;flex-direction:column;min-width:0;overflow:hidden}.woo-file-text strong,.woo-file-text small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.woo-file-text strong{font-size:12px;font-weight:550}.woo-file-text small{color:#79899b;font-size:10px}
+.woo-file-row .row-action{flex:none;font-size:10px;padding:4px 7px}
+.woo-commit-files-heading{display:flex;align-items:center;gap:8px;margin-bottom:5px}.woo-commit-files-heading h4{margin:0}
+.woo-context-menu{position:fixed;z-index:80;width:265px;max-height:min(450px,90vh);overflow:auto;padding:5px;background:#17212d;border:1px solid #3a495d;border-radius:7px;box-shadow:0 16px 40px #000a}
+.woo-context-title{margin:0 0 4px;padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8495a9;font-size:10px}
+.woo-context-menu button{display:block;width:100%;min-height:29px;padding:5px 8px;border:0;border-radius:4px;background:transparent;color:#e4edf6;text-align:left;font-size:12px}
+.woo-context-menu button:hover:not(:disabled){background:#26394f}.woo-context-menu button:disabled{opacity:.45;cursor:not-allowed}.woo-context-menu button.danger{color:#f0a0a2}
+.woo-dialog-backdrop{position:fixed;inset:0;z-index:90;display:grid;place-items:center;background:#0009}
+.woo-reset-dialog{width:min(440px,calc(100vw - 32px));padding:18px;border:1px solid #3a495d;border-radius:9px;background:#17212d;box-shadow:0 18px 50px #000a}
+.woo-reset-dialog h3{margin-top:0}.woo-reset-dialog select{display:block;width:100%;margin:8px 0 14px;padding:8px;background:#101820;color:#e5edf6;border:1px solid #3a495d}
+.woo-dialog-actions{display:flex;justify-content:flex-end;gap:8px}
+.woo-branch-menu-trigger{flex:1;min-width:0;padding:0 4px;border:0;background:transparent;text-align:left;color:inherit;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.woo-branch-menu-trigger:hover:not(:disabled){color:#cfe5ff;text-decoration:underline}
+@media(max-width:700px){.woo-main{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.woo-sidebar{max-height:160px}.woo-sidebar-label,.woo-sidebar .branches-panel{display:none}.woo-nav-bottom{margin-top:0;border:0;padding:0}.woo-topbar{flex-wrap:wrap;height:auto;min-height:44px}.woo-shell{grid-template-rows:auto 38px minmax(0,1fr) 25px}.woo-workspace-selector>button{min-width:130px}}

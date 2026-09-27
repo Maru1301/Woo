@@ -11,12 +11,14 @@ import OperationHistory from "./features/operations/OperationHistory";
 import DiffViewer, { type DiffSource } from "./features/diff/DiffViewer";
 import { useRepositorySession } from "./app/repository-session/useRepositorySession";
 import { FileGroup } from "./features/changes/FileGroup";
+import { FileViewToggle, type FileViewMode } from "./features/changes/FilePresentation";
+import { ContextMenu } from "./components/ui/ContextMenu";
 import { WorkspaceLayout, type WorkspaceView } from "./layout/WorkspaceLayout";
 import { WorkspacePanel } from "./features/workspace/WorkspacePanel";
 import { createWorkspace, deleteWorkspace, registerRepository, removeRepository, renameWorkspace, restoreWorkspaceSession, switchWorkspace, switchWorkspaceRepository, type WorkspaceCatalog, type WorkspaceTransition } from "./features/workspace/workspace";
 import {
   checkoutBranch, commitStaged, createBranch, deleteBranch, errorCode, getBranches, getRepositoryState, messageForError, partialStage, renameBranch, revalidateRepository, stageAll, stageFile,
-  cherryPick, resetTo, revertCommit, unstageAll, unstageFile, type AutoRefreshEvent, type ConflictMutationResult, type FileChange, type HistoryMutationResult, type MergeMutationResult, type PartialSelection, type PartialStageResult, type RemoteRefresh, type RepositoryState, type RepositoryStatus, type ResetMode, type StashMutationResult,
+  cherryPick, createTag, rebaseOnto, resetTo, revertCommit, unstageAll, unstageFile, type AutoRefreshEvent, type ConflictMutationResult, type FileChange, type HistoryMutationResult, type MergeMutationResult, type PartialSelection, type PartialStageResult, type RemoteRefresh, type RepositoryState, type RepositoryStatus, type ResetMode, type StashMutationResult,
 } from "./lib/repository";
 
 export default function App() {
@@ -25,6 +27,8 @@ export default function App() {
   const [workspaceError, setWorkspaceError] = useState("");
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
   const [activeView, setActiveView] = useState<WorkspaceView>("history");
+  const [localFilesMode, setLocalFilesMode] = useState<FileViewMode>("list");
+  const [fileMenu, setFileMenu] = useState<{ x: number; y: number; source: "staged" | "unstaged" | "untracked"; change: FileChange } | null>(null);
   const [showOpen, setShowOpen] = useState(true);
   const [session, dispatchSession] = useRepositorySession();
   const { repository, status, branches, operation, conflicts } = session;
@@ -62,6 +66,7 @@ export default function App() {
     const current = repositoryRef.current;
     if (!current || event.sessionId !== current.sessionId || event.sequence <= lastWatchSequence.current) return;
     lastWatchSequence.current = event.sequence;
+    setFileMenu(null);
     if (event.unavailable) {
       dispatchSession({ type: "statusError", message: event.unavailable.message, clearOperation: true });
       setSelectedChange(null);
@@ -129,6 +134,7 @@ export default function App() {
 
   function applyRepositoryState(state: RepositoryState) {
     dispatchSession({ type: "repositoryState", state });
+    setFileMenu(null);
     setConflictVersion((value) => value + 1);
   }
 
@@ -157,6 +163,7 @@ export default function App() {
     branchRequest.current += 1;
     setBranchError("");
     setSelectedChange(null);
+    setFileMenu(null);
     setCommitMessage("");
     setCommitError("");
     setCommitNotice("");
@@ -248,6 +255,7 @@ export default function App() {
     setBusy("Refreshing changes");
     dispatchSession({ type: "statusLoading" });
     setSelectedChange(null);
+    setFileMenu(null);
     try {
       applyRepositoryState(await getRepositoryState());
     } catch (cause) {
@@ -464,6 +472,53 @@ export default function App() {
     } finally { busyRef.current = false; setBusy(null); }
   }
 
+  async function tagSelectedCommit(hash: string): Promise<void> {
+    if (busyRef.current || managementBusyRef.current > 0 || remoteBusy || !repository || operation.kind !== "none") return;
+    const name = window.prompt(`Create lightweight tag at ${hash.slice(0, 10)}:`, "");
+    if (!name?.trim()) return;
+    busyRef.current = true;
+    setBusy(`Creating tag ${name.trim()}`);
+    setHistoryActionError("");
+    try {
+      await createTag(name.trim(), null, hash);
+      setTagRefreshVersion((value) => value + 1);
+      setHistoryRefreshVersion((value) => value + 1);
+      setHistoryActionNotice(`Created tag ${name.trim()}.`);
+    } catch (cause) {
+      setHistoryActionError(messageForError(cause));
+      if (errorCode(cause) === "tag_refresh_failed") inconsistentManagement("Tag refs changed, but updated state could not be loaded.");
+      throw cause;
+    } finally { busyRef.current = false; setBusy(null); }
+  }
+
+  async function branchAtHead(hash: string): Promise<void> {
+    if (repositoryRef.current?.head?.hash !== hash || busyRef.current || managementBusyRef.current > 0 || remoteBusy || operation.kind !== "none") throw new Error("The selected commit is no longer the current HEAD.");
+    const name = window.prompt(`Create local branch at ${hash.slice(0, 10)}:`, "");
+    if (!name?.trim()) return;
+    busyRef.current = true;
+    setBusy(`Creating ${name.trim()}`);
+    try {
+      dispatchSession({ type: "branchesReady", branches: await createBranch(name.trim()) });
+      setHistoryRefreshVersion((value) => value + 1);
+      setHistoryActionNotice(`Created branch ${name.trim()}.`);
+    } catch (cause) { setHistoryActionError(messageForError(cause)); if (errorCode(cause) === "branch_refresh_failed") inconsistentManagement("Branch refs changed, but updated state could not be loaded."); throw cause; }
+    finally { busyRef.current = false; setBusy(null); }
+  }
+
+  async function rebaseOntoSelectedBranch(fullRef: string): Promise<void> {
+    if (busyRef.current || managementBusyRef.current > 0 || remoteBusy || !repository || operation.kind !== "none" || conflicts.length > 0) return;
+    busyRef.current = true;
+    setBusy("Rebasing current branch");
+    setHistoryActionError("");
+    try {
+      const result = await rebaseOnto(fullRef);
+      applyHistoryResult(result);
+      if (result.error) throw result.error;
+      setHistoryActionNotice(result.state.operation.kind === "none" ? "Rebase complete." : "Rebase stopped. Resolve and stage conflicts in Merge / Conflicts.");
+    } catch (cause) { setHistoryActionError(messageForError(cause)); if (errorCode(cause) === "merge_refresh_failed") inconsistentManagement("Git ran, but updated state could not be loaded."); throw cause; }
+    finally { busyRef.current = false; setBusy(null); }
+  }
+
   function applyConflictResult(result: ConflictMutationResult) {
     applyRepositoryState(result.state);
     setSelectedChange(null);
@@ -476,21 +531,38 @@ export default function App() {
   const hasStaged = !!changes && changes.staged.length > 0;
   const controlsBusy = !!busy || remoteBusy || managementBusy;
   const changeCount = changes ? changes.staged.length + changes.unstaged.length + changes.untracked.length + changes.conflicted.length : 0;
+  const activeWorkspace = workspaceCatalog?.workspaces.find((item) => item.id === workspaceCatalog.activeWorkspaceId);
+
+  function showFileMenu(source: "staged" | "unstaged" | "untracked", change: FileChange, event: React.MouseEvent) {
+    event.preventDefault();
+    setFileMenu({ x: event.clientX, y: event.clientY, source, change });
+  }
+
+  function fullFilePath(file: FileChange): string {
+    const base = repository?.path.replace(/[\\/]$/, "") ?? "";
+    const separator = base.includes("\\") ? "\\" : "/";
+    return `${base}${separator}${file.path.replaceAll("/", separator)}`;
+  }
 
   useEffect(() => {
-    if (repository && operation.kind !== "none") setActiveView("manage");
+    if (repository && operation.kind !== "none") { setShowOpen(false); setActiveView("merge"); }
   }, [repository, operation.kind]);
 
-  return <WorkspaceLayout repository={repository} repositoryError={status.phase === "error" ? status.message : undefined} activeView={activeView} onViewChange={(view) => { setShowOpen(false); setActiveView(view); }} onOpen={() => setShowOpen(true)} openDisabled={controlsBusy} changeCount={changeCount} busy={busy} remoteControls={repository && <RemotePanel key={`${repository.path}:${sessionVersion}`} onComplete={applyRemoteRefresh} onInconsistent={inconsistentManagement} onBusyChange={setRemoteBusy} localBusy={!!busy || managementBusy || repositoryMutationDisabled} />} sidebar={repository && <BranchPanel compact state={branches} currentBranch={repository.branch} busy={controlsBusy || repositoryMutationDisabled} onCreate={createLocalBranch} onCheckout={(name) => void switchBranch(name)} onRename={(ref, name) => changeBranchRef(`Renaming ${ref}`, () => renameBranch(ref, name))} onDelete={(ref) => changeBranchRef(`Deleting ${ref}`, () => deleteBranch(ref))} onRetry={() => void loadBranches()} error={branchError} />}>
+  return <WorkspaceLayout repository={repository} repositoryError={status.phase === "error" ? status.message : undefined} activeView={activeView} onViewChange={(view) => { setShowOpen(false); setActiveView(view); }} onOpen={() => setShowOpen(true)} openDisabled={controlsBusy} changeCount={changeCount} busy={busy}
+    workspaceName={activeWorkspace?.name ?? "Default"}
+    workspaceMenu={<WorkspacePanel catalog={workspaceCatalog} busy={workspaceBusy || controlsBusy} error={workspaceError}
+      onCreate={(name) => void runWorkspaceTransition("Creating workspace", () => createWorkspace(name))}
+      onRename={(id, name) => void renameCurrentWorkspace(id, name)}
+      onDelete={(id) => void runWorkspaceTransition("Deleting workspace", () => deleteWorkspace(id))}
+      onSwitch={(id) => void runWorkspaceTransition("Switching workspace", () => switchWorkspace(id))}
+      onSelectRepository={(workspaceId, repositoryId) => void runWorkspaceTransition("Switching repository", () => switchWorkspaceRepository(workspaceId, repositoryId))}
+      onRemoveRepository={(workspaceId, repositoryId) => void runWorkspaceTransition("Removing repository", () => removeRepository(workspaceId, repositoryId))} />}
+    repositoryTabs={activeWorkspace?.repositories.map((item) => <button type="button" key={item.id} className={`woo-repo-tab ${activeWorkspace.activeRepositoryId === item.id ? "active" : ""}`} title={item.path} disabled={controlsBusy || workspaceBusy} onClick={() => void runWorkspaceTransition("Switching repository", () => switchWorkspaceRepository(activeWorkspace.id, item.id))}>{activeWorkspace.activeRepositoryId === item.id && changeCount > 0 && <span className="woo-dirty">●</span>}{item.path.split(/[\\/]/).filter(Boolean).at(-1) ?? item.path}</button>)}
+    activity={(open) => <OperationHistory active={open} />}
+    remoteControls={repository && <RemotePanel key={`${repository.path}:${sessionVersion}`} onComplete={applyRemoteRefresh} onInconsistent={inconsistentManagement} onBusyChange={setRemoteBusy} localBusy={!!busy || managementBusy || repositoryMutationDisabled} />}
+    sidebar={repository && <BranchPanel key={`sidebar:${repository.path}:${sessionVersion}`} compact state={branches} currentBranch={repository.branch} busy={controlsBusy || repositoryMutationDisabled} onCreate={createLocalBranch} onCheckout={(name) => void switchBranch(name)} onRename={(ref, name) => changeBranchRef(`Renaming ${ref}`, () => renameBranch(ref, name))} onDelete={(ref) => changeBranchRef(`Deleting ${ref}`, () => deleteBranch(ref))} onRetry={() => void loadBranches()} error={branchError} />}>
     {(!repository || showOpen) && <div className="woo-open-view">
         <div className="intro"><p className="eyebrow">YOUR WORKSPACE</p><h1>Workspaces and repositories</h1><p>Choose one active repository. Git state loads only for that repository.</p></div>
-        <WorkspacePanel catalog={workspaceCatalog} busy={workspaceBusy || controlsBusy} error={workspaceError}
-          onCreate={(name) => void runWorkspaceTransition("Creating workspace", () => createWorkspace(name))}
-          onRename={(id, name) => void renameCurrentWorkspace(id, name)}
-          onDelete={(id) => void runWorkspaceTransition("Deleting workspace", () => deleteWorkspace(id))}
-          onSwitch={(id) => void runWorkspaceTransition("Switching workspace", () => switchWorkspace(id))}
-          onSelectRepository={(workspaceId, repositoryId) => void runWorkspaceTransition("Switching repository", () => switchWorkspaceRepository(workspaceId, repositoryId))}
-          onRemoveRepository={(workspaceId, repositoryId) => void runWorkspaceTransition("Removing repository", () => removeRepository(workspaceId, repositoryId))} />
         <div className="open-panel">
           <label htmlFor="repo-path">Add repository to active workspace</label>
         <div className="path-controls">
@@ -503,7 +575,7 @@ export default function App() {
       {repository && <button className="secondary woo-open-close" onClick={() => setShowOpen(false)}>Return to workspace</button>}
     </div>}
       {repository && <>
-        <div className="woo-view woo-manage-view" hidden={showOpen || activeView !== "manage"}>
+        <div className="woo-view woo-manage-view" hidden={showOpen || activeView !== "branches"}>
         <section className="repo-card" aria-label="Repository information">
           <div className="repo-heading"><span className="repo-icon">⌘</span><div><p className="eyebrow">REPOSITORY</p><h2>{repository.path.split(/[\\/]/).filter(Boolean).at(-1)}</h2></div></div>
           <dl>
@@ -512,15 +584,20 @@ export default function App() {
             <div><dt>HEAD</dt><dd>{repository.head ? <><code>{repository.head.hash.slice(0, 10)}</code><span className="subject">{repository.head.subject}</span></> : "No commits yet"}</dd></div>
           </dl>
         </section>
-        <BranchPanel state={branches} currentBranch={repository.branch} busy={controlsBusy || repositoryMutationDisabled} onCreate={createLocalBranch} onCheckout={(name) => void switchBranch(name)} onRename={(ref, name) => changeBranchRef(`Renaming ${ref}`, () => renameBranch(ref, name))} onDelete={(ref) => changeBranchRef(`Deleting ${ref}`, () => deleteBranch(ref))} onRetry={() => void loadBranches()} error={branchError} />
+        <BranchPanel key={`tool:${repository.path}:${sessionVersion}`} state={branches} currentBranch={repository.branch} busy={controlsBusy || repositoryMutationDisabled} onCreate={createLocalBranch} onCheckout={(name) => void switchBranch(name)} onRename={(ref, name) => changeBranchRef(`Renaming ${ref}`, () => renameBranch(ref, name))} onDelete={(ref) => changeBranchRef(`Deleting ${ref}`, () => deleteBranch(ref))} onRetry={() => void loadBranches()} error={branchError} />
+        </div>
+        <div className="woo-view woo-manage-view" hidden={showOpen || activeView !== "merge"}>
         <MergePanel key={`merge:${repository.path}:${sessionVersion}`} branches={branches.phase === "ready" ? branches.data.branches : []} operation={operation} conflicts={conflicts} busy={controlsBusy || status.phase !== "ready"} refreshToken={conflictVersion} onBusyChange={managementBusyChanged} onMerge={applyMergeResult} onHistory={applyHistoryResult} onConflict={applyConflictResult} onInconsistent={inconsistentManagement} />
+        </div>
+        <div className="woo-view woo-manage-view" hidden={showOpen || activeView !== "stashes"}>
         <StashPanel key={`stash:${repository.path}:${sessionVersion}`} busy={controlsBusy || repositoryMutationDisabled} onBusyChange={managementBusyChanged} onMutation={applyStashMutation} onInconsistent={inconsistentManagement} />
+        </div>
+        <div className="woo-view woo-manage-view" hidden={showOpen || activeView !== "tags"}>
         <TagPanel key={`tag:${repository.path}:${sessionVersion}`} refreshToken={tagRefreshVersion} busy={controlsBusy || repositoryMutationDisabled} onBusyChange={managementBusyChanged} onMutation={() => setHistoryRefreshVersion((value) => value + 1)} onInconsistent={inconsistentManagement} />
-        <OperationHistory active={!showOpen && activeView === "manage"} />
         </div>
         <section className="changes-panel woo-view" aria-label="Working tree changes" hidden={showOpen || activeView !== "changes"}>
           <div className="woo-changes-list">
-          <div className="changes-heading"><div><p className="eyebrow">WORKING TREE</p><h2>Changes</h2></div><div className="change-actions">
+          <div className="changes-heading"><div><p className="eyebrow">WORKING TREE</p><h2>Changes</h2></div><FileViewToggle mode={localFilesMode} onChange={setLocalFilesMode} /><div className="change-actions">
             <button className="secondary" disabled={controlsBusy} onClick={() => void refresh()}>Refresh</button>
             <button className="secondary" disabled={controlsBusy || repositoryMutationDisabled || !hasStaged} onClick={() => void changeIndex("Unstaging all", unstageAll)}>Unstage All</button>
             <button disabled={controlsBusy || repositoryMutationDisabled || !hasStageable} onClick={() => void changeIndex("Staging all", stageAll)}>Stage All</button>
@@ -529,10 +606,10 @@ export default function App() {
           {status.phase === "loading" && <p className="status-placeholder">Loading changes…</p>}
           {status.phase === "error" && <p className="error" role="alert">{status.message}</p>}
           {changes && <div className="change-groups">
-            <FileGroup title="Staged" files={changes.staged} action="Unstage" onSelect={(file) => setSelectedChange({ source: "staged", change: file })} onAction={(file) => void changeIndex(`Unstaging ${file.path}`, () => unstageFile(file))} busy={controlsBusy || repositoryMutationDisabled} />
-            <FileGroup title="Unstaged" files={changes.unstaged} action="Stage" onSelect={(file) => setSelectedChange({ source: "unstaged", change: file })} onAction={(file) => void changeIndex(`Staging ${file.path}`, () => stageFile(file))} busy={controlsBusy || repositoryMutationDisabled} />
-            <FileGroup title="Untracked" files={changes.untracked} action="Stage" onSelect={(file) => setSelectedChange({ source: "untracked", change: file })} onAction={(file) => void changeIndex(`Staging ${file.path}`, () => stageFile(file))} busy={controlsBusy || repositoryMutationDisabled} />
-            {changes.conflicted.length > 0 && <FileGroup title="Conflicted" files={changes.conflicted} busy={controlsBusy || repositoryMutationDisabled} />}
+            <FileGroup title="Staged" files={changes.staged} mode={localFilesMode} selectedPath={selectedChange?.source === "staged" ? selectedChange.change.path : null} action="Unstage" onSelect={(file) => setSelectedChange({ source: "staged", change: file })} onContextMenu={(file, event) => showFileMenu("staged", file, event)} onAction={(file) => void changeIndex(`Unstaging ${file.path}`, () => unstageFile(file))} busy={controlsBusy || repositoryMutationDisabled} />
+            <FileGroup title="Unstaged" files={changes.unstaged} mode={localFilesMode} selectedPath={selectedChange?.source === "unstaged" ? selectedChange.change.path : null} action="Stage" onSelect={(file) => setSelectedChange({ source: "unstaged", change: file })} onContextMenu={(file, event) => showFileMenu("unstaged", file, event)} onAction={(file) => void changeIndex(`Staging ${file.path}`, () => stageFile(file))} busy={controlsBusy || repositoryMutationDisabled} />
+            <FileGroup title="Untracked" files={changes.untracked} mode={localFilesMode} selectedPath={selectedChange?.source === "untracked" ? selectedChange.change.path : null} action="Stage" onSelect={(file) => setSelectedChange({ source: "untracked", change: file })} onContextMenu={(file, event) => showFileMenu("untracked", file, event)} onAction={(file) => void changeIndex(`Staging ${file.path}`, () => stageFile(file))} busy={controlsBusy || repositoryMutationDisabled} />
+            {changes.conflicted.length > 0 && <FileGroup title="Conflicted" files={changes.conflicted} mode={localFilesMode} busy={controlsBusy || repositoryMutationDisabled} />}
           </div>}
           <div className="commit-area">
             <div><h3>Commit staged changes</h3><p>Only files in Staged are included in this commit.</p></div>
@@ -549,8 +626,16 @@ export default function App() {
         </section>
         <div className="woo-view woo-history-view" hidden={showOpen || activeView !== "history"}>
           {historyActionError && <p className="error" role="alert">{historyActionError}</p>}{historyActionNotice && <p className="commit-notice" role="status">{historyActionNotice}</p>}
-          <HistoryPanel key={`${repository.path}:${historyVersion}`} refreshToken={historyRefreshVersion} actionBusy={controlsBusy || repositoryMutationDisabled} onAction={runSelectedCommitAction} />
+          <HistoryPanel key={`${repository.path}:${historyVersion}`} refreshToken={historyRefreshVersion} actionBusy={controlsBusy || repositoryMutationDisabled} onAction={runSelectedCommitAction} onTag={tagSelectedCommit} onBranch={branchAtHead} currentHead={repository.head?.hash} rebaseTargets={branches.phase === "ready" ? branches.data.branches.filter((branch) => branch.kind === "local" && !branch.isCurrent).map((branch) => ({ name: branch.fullRefName, hash: branch.targetHash })) : []} onRebase={rebaseOntoSelectedBranch} />
         </div>
       </>}
+      {fileMenu && <ContextMenu x={fileMenu.x} y={fileMenu.y} title={fileMenu.change.path} onClose={() => setFileMenu(null)} actions={[
+        { label: fileMenu.source === "staged" ? "Unstage" : "Stage", disabled: controlsBusy || repositoryMutationDisabled, onSelect: () => { const { source, change } = fileMenu; void changeIndex(`${source === "staged" ? "Unstaging" : "Staging"} ${change.path}`, () => source === "staged" ? unstageFile(change) : stageFile(change)); } },
+        { label: fileMenu.source === "staged" ? "Unstage selected lines…" : "Stage selected lines…", disabled: fileMenu.source === "untracked" || controlsBusy || repositoryMutationDisabled, title: "Select changed lines in the diff pane", onSelect: () => setSelectedChange({ source: fileMenu.source, change: fileMenu.change }) },
+        { label: "Discard changes…", disabled: true, title: "Woo does not currently expose a safe discard operation", danger: true, onSelect: () => {} },
+        { label: "Open file", disabled: true, title: "External file opening is not yet available", onSelect: () => {} },
+        { label: "Open containing folder", disabled: true, title: "External folder opening is not yet available", onSelect: () => {} },
+        { label: "Copy path", onSelect: () => void (navigator.clipboard?.writeText(fullFilePath(fileMenu.change)) ?? Promise.reject()).catch(() => setCommitError("Could not copy the file path.")) },
+      ]} />}
   </WorkspaceLayout>;
 }

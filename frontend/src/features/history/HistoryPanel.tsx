@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import DiffViewer from "../diff/DiffViewer";
 import GraphRowView, { GRAPH_ROW_HEIGHT, graphWidth } from "./GraphRowView";
+import { FilePresentation, FileViewToggle, type FileViewMode } from "../changes/FilePresentation";
+import { ContextMenu } from "../../components/ui/ContextMenu";
 import { getCommitFiles, getCommitHistory, messageForError, type CommitHistoryPage, type CommitInfo, type FileChange, type GraphRow, type ResetMode } from "../../lib/repository";
 
 const ROW_HEIGHT = GRAPH_ROW_HEIGHT;
 const DEFAULT_VIEW_HEIGHT = 400;
 
-export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onAction }: { refreshToken?: number; actionBusy?: boolean; onAction?: (action: "cherry_pick" | "revert" | "reset", hash: string, mode?: ResetMode) => Promise<void> }) {
+export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onAction, onTag, onBranch, currentHead, rebaseTargets = [], onRebase }: { refreshToken?: number; actionBusy?: boolean; onAction?: (action: "cherry_pick" | "revert" | "reset", hash: string, mode?: ResetMode) => Promise<void>; onTag?: (hash: string) => Promise<void>; onBranch?: (hash: string) => Promise<void>; currentHead?: string | null; rebaseTargets?: { name: string; hash: string }[]; onRebase?: (name: string) => Promise<void> }) {
   const [history, setHistory] = useState<{ commits: CommitInfo[]; graphRows: GraphRow[] }>({ commits: [], graphRows: [] });
   const [maxLanes, setMaxLanes] = useState(1);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -19,7 +21,9 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState("");
   const [selectedFile, setSelectedFile] = useState<FileChange | null>(null);
-  const [fileScrollTop, setFileScrollTop] = useState(0);
+  const [commitFilesMode, setCommitFilesMode] = useState<FileViewMode>("list");
+  const [commitMenu, setCommitMenu] = useState<{ x: number; y: number; commit: CommitInfo } | null>(null);
+  const [resetTarget, setResetTarget] = useState<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewHeight, setViewHeight] = useState(DEFAULT_VIEW_HEIGHT);
   const [reload, setReload] = useState(0);
@@ -86,6 +90,7 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
     setHasMore(true);
     setSelectedHash(null);
     setSelectedSnapshot(null);
+    setCommitMenu(null);
     setConfirmHard(false); setActionError("");
     setScrollTop(0);
     void loadPage(null);
@@ -106,6 +111,7 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
     setCursor(null);
     setHasMore(true);
     setScrollTop(0);
+    setCommitMenu(null);
     setSelectedSnapshot((current) => current ? { ...current, refs: [] } : null);
     if (scrollElement.current) scrollElement.current.scrollTop = 0;
     void loadPage(null);
@@ -115,7 +121,6 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
     let cancelled = false;
     setCommitFiles([]);
     setSelectedFile(null);
-    setFileScrollTop(0);
     setFilesError("");
     if (!selectedHash) { setFilesLoading(false); return; }
     setFilesLoading(true);
@@ -130,8 +135,6 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
   const selected = commits.find((commit) => commit.hash === selectedHash) ?? (selectedSnapshot?.hash === selectedHash ? selectedSnapshot : null);
   const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - 5);
   const end = Math.min(commits.length, start + Math.ceil(viewHeight / ROW_HEIGHT) + 10);
-  const fileStart = Math.max(0, Math.floor(fileScrollTop / 34) - 4);
-  const fileEnd = Math.min(commitFiles.length, fileStart + 16);
 
   function onScroll(element: HTMLDivElement) {
     setScrollTop(element.scrollTop);
@@ -143,20 +146,32 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
   async function runAction(action: "cherry_pick" | "revert" | "reset", hash: string, mode?: ResetMode) {
     if (!onAction || actionBusy || actionWorking) return;
     setActionError(""); setActionWorking(true);
-    try { await onAction(action, hash, mode); setConfirmHard(false); }
+    try { await onAction(action, hash, mode); setConfirmHard(false); setResetTarget(null); }
     catch (cause) { if (alive.current) setActionError(messageForError(cause)); }
     finally { if (alive.current) setActionWorking(false); }
+  }
+
+  function selectCommit(commit: CommitInfo) {
+    if (selectedHash === commit.hash) return;
+    setSelectedHash(commit.hash);
+    setSelectedSnapshot(commit);
+    setCommitFiles([]);
+    setSelectedFile(null);
+    setFilesLoading(true);
+    setConfirmHard(false);
+    setActionError("");
   }
 
   return <section className="history-panel" aria-label="Commit history">
     <div className="woo-history-master">
     <div className="history-heading"><div><p className="eyebrow">HISTORY</p><h2>Commits</h2></div><button className="secondary" disabled={loading} onClick={() => setReload((value) => value + 1)}>Reload</button></div>
+    {actionError && !resetTarget && <p className="error" role="alert">{actionError}</p>}
     <div className="woo-history-listhead" style={{ "--woo-graph-column": `${graphColumnWidth}px` } as CSSProperties}><span>Graph</span><span>Commit</span><span>Author</span><span>Date</span></div>
     {commits.length === 0 && loading && <p className="status-placeholder">Loading recent commits…</p>}
     {commits.length === 0 && !loading && !error && <p className="status-placeholder">No commits yet.</p>}
     {commits.length > 0 && <div ref={scrollElement} className="history-scroll" onScroll={(event) => onScroll(event.currentTarget)}>
       <div className="history-spacer" style={{ height: commits.length * ROW_HEIGHT }}>
-        {commits.slice(start, end).map((commit, index) => <button type="button" className={`history-row ${selectedHash === commit.hash ? "selected" : ""}`} style={{ top: (start + index) * ROW_HEIGHT }} key={commit.hash} onClick={() => { if (selectedHash !== commit.hash) { setSelectedHash(commit.hash); setSelectedSnapshot(commit); setCommitFiles([]); setSelectedFile(null); setFilesLoading(true); setConfirmHard(false); setActionError(""); } }}>
+        {commits.slice(start, end).map((commit, index) => <button type="button" className={`history-row ${selectedHash === commit.hash ? "selected" : ""}`} style={{ top: (start + index) * ROW_HEIGHT }} key={commit.hash} onClick={() => selectCommit(commit)} onContextMenu={(event) => { event.preventDefault(); selectCommit(commit); setCommitMenu({ x: event.clientX, y: event.clientY, commit }); }}>
           <GraphRowView row={graphRows[start + index]} width={graphColumnWidth} selected={selectedHash === commit.hash} />
           <span className="history-content"><span className="history-subject">{commit.subject || "(no subject)"}</span><span className="history-meta"><code>{commit.hash.slice(0, 10)}</code></span>
           {commit.refs.length > 0 && <span className="history-refs">{commit.refs.join(" · ")}</span>}</span>
@@ -175,24 +190,32 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
       <div><dt>Date</dt><dd>{selected.timestamp}</dd></div>
       <div><dt>Refs</dt><dd>{selected.refs.join(", ") || "None"}</dd></div>
     </dl>
-      {onAction && <div className="history-actions"><h4>History actions</h4><p>Actions apply to the current branch. Cherry-pick and revert create commits; reset moves the branch to this commit.</p>
-        <div className="conflict-side-actions"><button className="secondary" disabled={actionBusy || actionWorking || selected.parentHashes.length > 1} onClick={() => void runAction("cherry_pick", selected.hash)}>Cherry-pick</button><button className="secondary" disabled={actionBusy || actionWorking || selected.parentHashes.length > 1} onClick={() => void runAction("revert", selected.hash)}>Revert</button></div>
-        {selected.parentHashes.length > 1 && <p className="management-hint">Merge commits need a mainline parent and cannot be cherry-picked or reverted here.</p>}
-        <div className="conflict-side-actions"><label htmlFor="reset-mode">Reset mode</label><select id="reset-mode" value={resetMode} disabled={actionBusy || actionWorking} onChange={(event) => { setResetMode(event.target.value as ResetMode); setConfirmHard(false); }}><option value="soft">Soft · keep index and working files</option><option value="mixed">Mixed · reset index, keep working files</option><option value="hard">Hard · discard tracked index and working changes</option></select><button className="secondary" disabled={actionBusy || actionWorking} onClick={() => { if (resetMode === "hard" && !confirmHard) { setConfirmHard(true); return; } void runAction("reset", selected.hash, resetMode); }}>{resetMode === "hard" && confirmHard ? "Confirm hard reset" : "Reset to commit"}</button></div>
-        {confirmHard && <p className="error" role="alert">Hard reset discards tracked staged and working-tree changes. Untracked files are not cleaned; Woo refuses a reset that could overwrite them. Click Confirm hard reset to proceed.</p>}
-        {actionError && <p className="error" role="alert">{actionError}</p>}{actionWorking && <p role="status">Running history operation…</p>}
-      </div>}
-      <div className="commit-files"><h4>Changed files {filesLoading ? "(loading…)" : `(${commitFiles.length})`}</h4>
+      <div className="commit-files"><div className="woo-commit-files-heading"><h4>Changed files {filesLoading ? "(loading…)" : `(${commitFiles.length})`}</h4><FileViewToggle mode={commitFilesMode} onChange={setCommitFilesMode} /></div>
         {selected.parentHashes.length > 1 && <p className="commit-compare-note">Compared with the first parent.</p>}
         {selected.parentHashes.length === 0 && <p className="commit-compare-note">Initial commit, compared with an empty tree.</p>}
         {filesError && <p className="error" role="alert">{filesError}</p>}
         {!filesLoading && !filesError && commitFiles.length === 0 && <p className="status-placeholder">No file changes against {selected.parentHashes.length > 1 ? "the first parent" : "this commit's parent"}.</p>}
-        {commitFiles.length > 0 && <div className="commit-file-scroll" style={{ height: Math.min(238, commitFiles.length * 34) }} onScroll={(event) => setFileScrollTop(event.currentTarget.scrollTop)}><div className="commit-file-spacer" style={{ height: commitFiles.length * 34 }}>
-          {commitFiles.slice(fileStart, fileEnd).map((file, index) => <button className={`commit-file-row ${selectedFile?.path === file.path ? "selected" : ""}`} style={{ top: (fileStart + index) * 34 }} key={`${file.path}:${fileStart + index}`} onClick={() => setSelectedFile(file)}><span>{file.kind.replace("_", " ")}</span>{file.oldPath && `${file.oldPath} → `}{file.path}</button>)}
-        </div></div>}
+        {commitFiles.length > 0 && <FilePresentation files={commitFiles} mode={commitFilesMode} selectedPath={selectedFile?.path} onSelect={setSelectedFile} maxHeight={238} />}
       </div>
       {selectedFile && <DiffViewer key={`${selected.hash}:${selectedFile.path}:${selectedFile.oldPath ?? ""}`} source="commit" commit={selected.hash} change={selectedFile} />}
     </div>}
     {!selected && <div className="commit-details woo-history-empty"><p>Select a commit to inspect its files and diff.</p></div>}
+    {commitMenu && <ContextMenu x={commitMenu.x} y={commitMenu.y} title={`${commitMenu.commit.hash.slice(0, 10)} · ${commitMenu.commit.subject}`} onClose={() => setCommitMenu(null)} actions={[
+      { label: "Checkout commit", disabled: true, title: "Detached commit checkout is not available in Woo", onSelect: () => {} },
+      { label: "Create branch here…", disabled: !onBranch || actionBusy || actionWorking || currentHead !== commitMenu.commit.hash, title: currentHead !== commitMenu.commit.hash ? "Branch creation currently targets HEAD" : undefined, onSelect: () => { if (onBranch) void onBranch(commitMenu.commit.hash).catch((cause) => setActionError(messageForError(cause))); } },
+      { label: "Create tag here…", disabled: !onTag || actionBusy || actionWorking, onSelect: () => { if (onTag) void onTag(commitMenu.commit.hash).catch((cause) => setActionError(messageForError(cause))); } },
+      { label: "Cherry-pick", disabled: !onAction || actionBusy || actionWorking || commitMenu.commit.parentHashes.length > 1, onSelect: () => void runAction("cherry_pick", commitMenu.commit.hash) },
+      { label: "Revert", disabled: !onAction || actionBusy || actionWorking || commitMenu.commit.parentHashes.length > 1, onSelect: () => void runAction("revert", commitMenu.commit.hash) },
+      { label: "Rebase current branch onto here…", disabled: !onRebase || actionBusy || actionWorking || !rebaseTargets.some((target) => target.hash === commitMenu.commit.hash), title: "Available when a different local branch points to this commit", onSelect: () => { const target = rebaseTargets.find((item) => item.hash === commitMenu.commit.hash); if (target && onRebase) void onRebase(target.name).catch((cause) => setActionError(messageForError(cause))); } },
+      { label: "Reset current branch to here…", disabled: !onAction || actionBusy || actionWorking, danger: true, onSelect: () => { setResetTarget(commitMenu.commit.hash); setResetMode("mixed"); setConfirmHard(false); } },
+      { label: "Copy commit hash", onSelect: () => void (navigator.clipboard?.writeText(commitMenu.commit.hash) ?? Promise.reject()).catch(() => setActionError("Could not copy the commit hash.")) },
+    ]} />}
+    {resetTarget && <div className="woo-dialog-backdrop" role="presentation"><div className="woo-reset-dialog" role="dialog" aria-modal="true" aria-label="Reset current branch">
+      <h3>Reset current branch</h3><p>Move the current branch to <code>{resetTarget.slice(0, 10)}</code>.</p>
+      <label htmlFor="reset-mode">Mode</label><select id="reset-mode" value={resetMode} disabled={actionBusy || actionWorking} onChange={(event) => { setResetMode(event.target.value as ResetMode); setConfirmHard(false); }}><option value="soft">Soft · keep index and working files</option><option value="mixed">Mixed · reset index, keep working files</option><option value="hard">Hard · discard tracked index and working changes</option></select>
+      {resetMode === "hard" && <p className="error" role="alert">Hard reset discards tracked staged and working-tree changes. Untracked files are not cleaned; Woo refuses a reset that could overwrite them.</p>}
+      {actionError && <p className="error" role="alert">{actionError}</p>}
+      <div className="woo-dialog-actions"><button type="button" className="secondary" disabled={actionWorking} onClick={() => setResetTarget(null)}>Cancel</button><button type="button" disabled={actionBusy || actionWorking} onClick={() => { if (resetMode === "hard" && !confirmHard) { setConfirmHard(true); return; } void runAction("reset", resetTarget, resetMode); }}>{resetMode === "hard" && confirmHard ? "Confirm hard reset" : "Reset to commit"}</button></div>
+    </div></div>}
   </section>;
 }
