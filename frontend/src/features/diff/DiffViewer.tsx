@@ -1,32 +1,44 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRepositoryViewActive, useRepositoryViewId } from "../../app/repository-session/RepositoryView";
 import { getCommitDiff, getStagedDiff, getUnstagedDiff, getUntrackedDiff, messageForError, type DiffFile, type DiffLine, type FileChange, type PartialSelection, type PartialStageResult } from "../../lib/repository";
 
 export type DiffSource = "unstaged" | "staged" | "untracked" | "commit";
 const ROW_HEIGHT = 26;
 const VIEW_HEIGHT = 420;
 
-export default function DiffViewer({ source, change, commit, busy = false, onPartial }: { source: DiffSource; change: FileChange; commit?: string; busy?: boolean; onPartial?: (selection: PartialSelection) => Promise<PartialStageResult> }) {
-  const [diff, setDiff] = useState<DiffFile | null>(null);
+export default function DiffViewer({ source, change, commit, busy: requestedBusy = false, enabled: requestedEnabled = true, onPartial, initialDiff = null, onDiff }: { source: DiffSource; change: FileChange; commit?: string; busy?: boolean; enabled?: boolean; onPartial?: (selection: PartialSelection) => Promise<PartialStageResult>; initialDiff?: DiffFile | null; onDiff?: (diff: DiffFile | null) => void }) {
+  const repositoryId = useRepositoryViewId();
+  const viewActive = useRepositoryViewActive();
+  const enabled = requestedEnabled && viewActive;
+  const busy = requestedBusy || !enabled;
+  const [diff, setDiff] = useState<DiffFile | null>(initialDiff);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!initialDiff);
   const [scrollTop, setScrollTop] = useState(0);
   const [selected, setSelected] = useState<{ hunk: number; lines: Set<number> } | null>(null);
   const [mutating, setMutating] = useState(false);
   const requestEpoch = useRef(0);
+  const onDiffRef = useRef(onDiff);
+  onDiffRef.current = onDiff;
 
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     const epoch = ++requestEpoch.current;
+    const retained = diff ?? initialDiff;
+    if (retained?.change.path === change.path && retained.change.oldPath === change.oldPath && retained.change.kind === change.kind) {
+      setDiff(retained); setLoading(false); return;
+    }
     setDiff(null); setError(""); setLoading(true); setScrollTop(0); setSelected(null);
-    const request = source === "commit" ? getCommitDiff(commit!, change)
-      : source === "staged" ? getStagedDiff(change)
-      : source === "untracked" ? getUntrackedDiff(change)
-      : getUnstagedDiff(change);
-    void request.then((result) => { if (!cancelled && epoch === requestEpoch.current) setDiff(result); })
+    const request = source === "commit" ? getCommitDiff(repositoryId, commit!, change)
+      : source === "staged" ? getStagedDiff(repositoryId, change)
+      : source === "untracked" ? getUntrackedDiff(repositoryId, change)
+      : getUnstagedDiff(repositoryId, change);
+    void request.then((result) => { if (!cancelled && epoch === requestEpoch.current) { setDiff(result); onDiffRef.current?.(result); } })
       .catch((cause) => { if (!cancelled && epoch === requestEpoch.current) setError(messageForError(cause)); })
       .finally(() => { if (!cancelled && epoch === requestEpoch.current) setLoading(false); });
     return () => { cancelled = true; };
-  }, [source, commit, change.path, change.oldPath, change.kind]);
+  }, [source, commit, change.path, change.oldPath, change.kind, enabled]);
 
   const rows = useMemo(() => diff?.hunks.flatMap((hunk, hunkIndex) => [{ header: hunk.header, line: null as DiffLine | null, hunkIndex, lineIndex: -1 }, ...hunk.lines.map((line, lineIndex) => ({ header: null as string | null, line, hunkIndex, lineIndex }))]) ?? [], [diff]);
   const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - 5);
@@ -39,10 +51,11 @@ export default function DiffViewer({ source, change, commit, busy = false, onPar
     try {
       const result = await onPartial!({ revision: diff.revision, hunkIndex, lineIndices });
       setDiff(source === "staged" ? result.stagedDiff : result.unstagedDiff);
+      onDiffRef.current?.(source === "staged" ? result.stagedDiff : result.unstagedDiff);
       setSelected(null);
       if (result.error) setError(result.error.message);
     } catch (cause) {
-      setDiff(null); setSelected(null);
+      setDiff(null); onDiffRef.current?.(null); setSelected(null);
       setError(`${messageForError(cause)} Refresh the file diff before trying again.`);
     } finally { setMutating(false); }
   }

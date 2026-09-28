@@ -24,6 +24,8 @@ pub struct BranchInfo {
     pub is_current: bool,
     pub target_hash: String,
     pub upstream: Option<String>,
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -41,7 +43,41 @@ pub struct BranchTiming {
 
 // Git refnames cannot contain newline or NUL. The last field filters symbolic
 // remote HEAD aliases; all other fields are separated by Git's %00 format atom.
-const BRANCH_FORMAT: &str = "%(refname)%00%(objectname)%00%(upstream:short)%00%(HEAD)%00%(symref)";
+const BRANCH_FORMAT: &str = "%(refname)%00%(objectname)%00%(upstream:short)%00%(HEAD)%00%(symref)%00%(upstream:track,nobracket)";
+
+fn parse_tracking(upstream: bool, value: Option<&str>) -> (Option<u32>, Option<u32>) {
+    if !upstream {
+        return (None, None);
+    }
+    let Some(value) = value else {
+        return (None, None);
+    };
+    let value = value.trim().trim_start_matches('[').trim_end_matches(']');
+    if value == "gone" {
+        return (None, None);
+    }
+    if value.is_empty() {
+        return (Some(0), Some(0));
+    }
+    let mut ahead = 0;
+    let mut behind = 0;
+    for part in value.split(',').map(str::trim) {
+        if let Some(count) = part
+            .strip_prefix("ahead ")
+            .and_then(|count| count.parse::<u32>().ok())
+        {
+            ahead = count;
+        } else if let Some(count) = part
+            .strip_prefix("behind ")
+            .and_then(|count| count.parse::<u32>().ok())
+        {
+            behind = count;
+        } else {
+            return (None, None);
+        }
+    }
+    (Some(ahead), Some(behind))
+}
 
 pub fn parse_branches(bytes: &[u8]) -> Result<BranchList, AppError> {
     let mut branches = Vec::new();
@@ -50,7 +86,7 @@ pub fn parse_branches(bytes: &[u8]) -> Result<BranchList, AppError> {
         .filter(|record| !record.is_empty())
     {
         let fields: Vec<&[u8]> = record.split(|byte| *byte == 0).collect();
-        if fields.len() != 5 {
+        if fields.len() != 5 && fields.len() != 6 {
             return Err(AppError::new(
                 "invalid_git_output",
                 "Git returned malformed branch information.",
@@ -86,6 +122,14 @@ pub fn parse_branches(bytes: &[u8]) -> Result<BranchList, AppError> {
             ));
         }
         let upstream = field(2)?;
+        let (ahead, behind) = parse_tracking(
+            !upstream.is_empty(),
+            if fields.len() == 6 {
+                Some(field(5)?)
+            } else {
+                None
+            },
+        );
         branches.push(BranchInfo {
             name: name.to_string(),
             full_ref_name: full.to_string(),
@@ -93,6 +137,8 @@ pub fn parse_branches(bytes: &[u8]) -> Result<BranchList, AppError> {
             is_current: fields[3] == b"*",
             target_hash: hash.to_string(),
             upstream: (!upstream.is_empty()).then(|| upstream.to_string()),
+            ahead,
+            behind,
         });
     }
     Ok(BranchList { branches })
@@ -216,6 +262,17 @@ mod tests {
     fn detached_has_no_current_branch() {
         let list = parse_branches(b"refs/heads/main\0abc\0\0 \0\n").unwrap();
         assert!(!list.branches[0].is_current);
+    }
+
+    #[test]
+    fn tracks_ahead_and_behind_from_upstream_snapshot() {
+        let list =
+            parse_branches(b"refs/heads/main\0abc\0origin/main\0*\0\0ahead 2, behind 1\n").unwrap();
+        assert_eq!(list.branches[0].ahead, Some(2));
+        assert_eq!(list.branches[0].behind, Some(1));
+        let synchronized = parse_branches(b"refs/heads/main\0abc\0origin/main\0*\0\0\n").unwrap();
+        assert_eq!(synchronized.branches[0].ahead, Some(0));
+        assert_eq!(synchronized.branches[0].behind, Some(0));
     }
     #[test]
     fn rejects_malformed_record() {

@@ -14,3 +14,5 @@ export function registerRepository(workspaceId: string, path: string): Promise<W
 export function removeRepository(workspaceId: string, repositoryId: string): Promise<WorkspaceTransition> { return invoke("remove_workspace_repository", { workspaceId, repositoryId }); }
 export function switchWorkspace(id: string): Promise<WorkspaceTransition> { return invoke("switch_workspace", { id }); }
 export function switchWorkspaceRepository(workspaceId: string, repositoryId: string): Promise<WorkspaceTransition> { return invoke("switch_workspace_repository", { workspaceId, repositoryId }); }
+export function selectWorkspaceRepository(workspaceId: string, repositoryId: string): Promise<WorkspaceCatalog> { return invoke("select_workspace_repository", { workspaceId, repositoryId }); }
+export function activateRepositoryWatch(repositoryId: string): Promise<RepositoryInfo> { return invoke("activate_repository_watch", { repositoryId }); }

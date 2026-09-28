@@ -1,42 +1,52 @@
 import { useEffect, useRef, useState } from "react";
+import { useRepositoryViewActive, useRepositoryViewId } from "../../app/repository-session/RepositoryView";
 import { cancelRemoteOperation, getRemoteOperation, getRemotes, messageForError, startFetch, startPull, startPush, type RemoteInfo, type RemoteKind, type RemoteOperationStatus, type RemoteRefresh } from "../../lib/repository";
 
-export default function RemotePanel({ onComplete, onInconsistent, onBusyChange, localBusy }: {
+export default function RemotePanel({ onComplete, onInconsistent, onBusyChange, localBusy, initialRemotes, canPullPush }: {
   onComplete: (refresh: RemoteRefresh) => void;
   onInconsistent: (message: string) => void;
   onBusyChange: (busy: boolean) => void;
   localBusy: boolean;
+  initialRemotes?: RemoteInfo[];
+  canPullPush: boolean;
 }) {
-  const [remotes, setRemotes] = useState<RemoteInfo[]>([]);
-  const [remote, setRemote] = useState("");
-  const [loading, setLoading] = useState(true);
+  const repositoryId = useRepositoryViewId();
+  const sessionActive = useRepositoryViewActive();
+  const unavailable = localBusy || !sessionActive;
+  const [remotes, setRemotes] = useState<RemoteInfo[]>(initialRemotes ?? []);
+  const [remote, setRemote] = useState(initialRemotes?.[0]?.name ?? "");
+  const [loading, setLoading] = useState(!initialRemotes);
   const [error, setError] = useState("");
   const [operation, setOperation] = useState<RemoteOperationStatus | null>(null);
   const [notice, setNotice] = useState("");
   const alive = useRef(true);
+  const mounted = useRef(true);
   const active = useRef(false);
   const callbacks = useRef({ onComplete, onInconsistent, onBusyChange });
   callbacks.current = { onComplete, onInconsistent, onBusyChange };
+  useEffect(() => () => { mounted.current = false; }, []);
 
   useEffect(() => {
-    alive.current = true;
-    void getRemotes().then((list) => {
-      if (!alive.current) return;
+    let cancelled = false;
+    alive.current = sessionActive;
+    if (!sessionActive) return () => { alive.current = false; };
+    void getRemotes(repositoryId).then((list) => {
+      if (cancelled || !alive.current) return;
       setRemotes(list.remotes);
-      setRemote((current) => current || list.remotes[0]?.name || "");
-    }).catch((cause) => { if (alive.current) setError(messageForError(cause)); })
-      .finally(() => { if (alive.current) setLoading(false); });
-    return () => { alive.current = false; callbacks.current.onBusyChange(false); };
-  }, []);
+      setRemote((current) => list.remotes.some((item) => item.name === current) ? current : list.remotes[0]?.name || "");
+    }).catch((cause) => { if (!cancelled && alive.current) setError(messageForError(cause)); })
+      .finally(() => { if (!cancelled && alive.current) setLoading(false); });
+    return () => { cancelled = true; alive.current = false; if (!active.current) callbacks.current.onBusyChange(false); };
+  }, [sessionActive]);
 
   async function poll(id: number) {
-    while (alive.current) {
+    while (mounted.current) {
       await new Promise((resolve) => setTimeout(resolve, 300));
-      if (!alive.current) break;
+      if (!mounted.current) break;
       let next: RemoteOperationStatus;
-      try { next = await getRemoteOperation(id); }
-      catch (cause) { if (alive.current) setError(messageForError(cause)); break; }
-      if (!alive.current) break;
+      try { next = await getRemoteOperation(repositoryId, id); }
+      catch (cause) { if (mounted.current) setError(messageForError(cause)); break; }
+      if (!mounted.current) break;
       setOperation(next);
       if (next.phase === "completed" || next.phase === "failed" || next.phase === "cancelled" || next.phase === "timed_out") {
         if (next.refresh) callbacks.current.onComplete(next.refresh);
@@ -52,18 +62,18 @@ export default function RemotePanel({ onComplete, onInconsistent, onBusyChange, 
       }
     }
     active.current = false;
-    if (alive.current) callbacks.current.onBusyChange(false);
+    if (mounted.current) callbacks.current.onBusyChange(false);
   }
 
   async function run(kind: RemoteKind) {
-    if (active.current || localBusy) return;
+    if (active.current || unavailable) return;
     active.current = true;
     callbacks.current.onBusyChange(true);
     setError("");
     setNotice("");
     try {
-      const started = kind === "fetch" ? await startFetch(remote) : kind === "pull" ? await startPull() : await startPush();
-      if (!alive.current) return;
+      const started = kind === "fetch" ? await startFetch(repositoryId, remote) : kind === "pull" ? await startPull(repositoryId) : await startPush(repositoryId);
+      if (!mounted.current) return;
       setOperation(started);
       void poll(started.id);
     } catch (cause) {
@@ -77,17 +87,17 @@ export default function RemotePanel({ onComplete, onInconsistent, onBusyChange, 
   return <section className="remote-panel" aria-label="Remote operations">
     <div className="remote-heading"><div><p className="eyebrow">REMOTES</p><h2>Sync</h2></div>
       <div className="remote-actions">
-        <select aria-label="Fetch remote" value={remote} disabled={running || loading || localBusy} onChange={(event) => setRemote(event.target.value)}>
+        <select aria-label="Fetch remote" value={remote} disabled={running || loading || unavailable} onChange={(event) => setRemote(event.target.value)}>
           {remotes.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
         </select>
-        <button className="secondary" disabled={!remote || running || localBusy} onClick={() => void run("fetch")}>Fetch</button>
-        <button className="secondary" disabled={running || localBusy || remotes.length === 0} onClick={() => void run("pull")}>Pull</button>
-        <button disabled={running || localBusy || remotes.length === 0} onClick={() => void run("push")}>Push</button>
+        <button className="secondary" disabled={!remote || running || unavailable} onClick={() => void run("fetch")}>Fetch</button>
+        <button className="secondary" disabled={running || unavailable || loading || remotes.length === 0 || !canPullPush} onClick={() => void run("pull")}>Pull</button>
+        <button disabled={running || unavailable || loading || remotes.length === 0 || !canPullPush} onClick={() => void run("push")}>Push</button>
       </div>
     </div>
     {loading && <p className="status-placeholder">Loading remotes…</p>}
     {!loading && remotes.length === 0 && !error && <p className="status-placeholder">No remotes configured.</p>}
-    {running && <p className="operation-feedback" role="status">{operation.kind === "fetch" ? "Fetching" : operation.kind === "pull" ? "Pulling" : "Pushing"}… {Math.floor(operation.elapsedMs / 1000)}s <button className="secondary" onClick={() => void cancelRemoteOperation(operation.id).catch((cause) => setError(messageForError(cause)))}>Cancel</button></p>}
+    {running && <p className="operation-feedback" role="status">{operation.kind === "fetch" ? "Fetching" : operation.kind === "pull" ? "Pulling" : "Pushing"}… {Math.floor(operation.elapsedMs / 1000)}s <button className="secondary" onClick={() => void cancelRemoteOperation(repositoryId, operation.id).catch((cause) => setError(messageForError(cause)))}>Cancel</button></p>}
     {notice && <p className="commit-notice" role="status">{notice}</p>}
     {error && <p className="error" role="alert">{error}</p>}
   </section>;

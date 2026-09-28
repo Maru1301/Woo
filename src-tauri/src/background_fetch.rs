@@ -12,6 +12,7 @@ pub const FETCH_INTERVAL: Duration = Duration::from_secs(10 * 60);
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundFetchEvent {
+    pub repository_id: Option<String>,
     pub session_id: u64,
     pub operation_id: u64,
     pub refresh: Option<RemoteRefresh>,
@@ -33,6 +34,7 @@ impl BackgroundFetchManager {
     pub async fn activate(&self, app: AppHandle, tree: Arc<WorkingTree>, info: &RepositoryInfo) {
         self.stop(&tree).await;
         let session_id = info.session_id;
+        let repository_id = tree.repository_id();
         let task = tokio::spawn(async move {
             loop {
                 wait_interval().await;
@@ -50,6 +52,7 @@ impl BackgroundFetchManager {
                         let _ = app.emit(
                             "background-fetch-completed",
                             BackgroundFetchEvent {
+                                repository_id: repository_id.clone(),
                                 session_id,
                                 operation_id: done.id,
                                 refresh: done.refresh,

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { getOperationHistory, messageForError, type OperationEntry } from "../../lib/repository";
 
-export default function OperationHistory({ active }: { active: boolean }) {
+export default function OperationHistory({ active, repositoryNames }: { active: boolean; repositoryNames: Record<string, string> }) {
   const [entries, setEntries] = useState<OperationEntry[]>([]);
   const [filter, setFilter] = useState<"all" | "user" | "background">("all");
   const [error, setError] = useState("");
@@ -26,7 +26,7 @@ export default function OperationHistory({ active }: { active: boolean }) {
     {error && <p className="error" role="alert">{error}</p>}
     {!error && visible.length === 0 && <p className="status-placeholder">No activity yet.</p>}
     <ol className="operation-history-list">{visible.map((entry) => <li key={entry.id}>
-      <div><strong>{entry.kind}</strong> <span>{entry.source === "background" ? "Background" : "User"}</span> <span>{entry.phase.replace("_", " ")}</span> <span>{entry.repositoryId.split(/[\\/]/).filter(Boolean).at(-1)}</span></div>
+      <div><strong>{entry.kind}</strong> <span>{entry.source === "background" ? "Background" : "User"}</span> <span>{entry.phase.replace("_", " ")}</span> <span>{repositoryNames[entry.repositoryId] ?? entry.repositoryId.split(/[\\/]/).filter(Boolean).at(-1)}</span></div>
       <small>{new Date(entry.startedAtMs).toLocaleString()} | {entry.durationMs == null ? "Running" : `${entry.durationMs} ms`}</small>
       {entry.diagnostics && <p className="error">{entry.diagnostics}</p>}
     </li>)}</ol>

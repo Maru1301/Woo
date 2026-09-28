@@ -28,6 +28,9 @@ use std::{
 };
 use tokio::sync::{broadcast, watch, Mutex};
 
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
+static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteKind {
@@ -483,15 +486,16 @@ pub(crate) fn valid_relative_path(path: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-/// M2 has one open repository. The mutex serializes repository switches, status
-/// reads, and mutation-plus-refresh so callers receive a consistent snapshot.
+/// One repository session. Its mutex keeps reads and mutation-plus-refresh
+/// consistent; the shared mutation gate serializes mutations across sessions.
 pub struct WorkingTree {
     git: GitRunner,
+    repository_id: std::sync::RwLock<Option<String>>,
+    mutation_gate: Arc<Mutex<()>>,
     repository: Mutex<Option<PathBuf>>,
     generation: AtomicU64,
     session_id: AtomicU64,
     remote_task: Mutex<Option<RemoteTask>>,
-    next_operation_id: AtomicU64,
     operation_log: OperationLog,
     remote_completions: broadcast::Sender<RemoteOperationStatus>,
     active_user_operations: AtomicU64,
@@ -508,11 +512,12 @@ impl Default for WorkingTree {
     fn default() -> Self {
         Self {
             git: GitRunner::with_timeout(Duration::from_secs(60)),
+            repository_id: std::sync::RwLock::new(None),
+            mutation_gate: Arc::new(Mutex::new(())),
             repository: Mutex::new(None),
             generation: AtomicU64::new(0),
             session_id: AtomicU64::new(0),
             remote_task: Mutex::new(None),
-            next_operation_id: AtomicU64::new(0),
             operation_log: OperationLog::default(),
             remote_completions: broadcast::channel(16).0,
             active_user_operations: AtomicU64::new(0),
@@ -521,8 +526,59 @@ impl Default for WorkingTree {
 }
 
 impl WorkingTree {
+    pub fn with_shared_mutation_gate(mutation_gate: Arc<Mutex<()>>) -> Self {
+        Self {
+            mutation_gate,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_mutation_gate(repository_id: String, mutation_gate: Arc<Mutex<()>>) -> Self {
+        Self {
+            repository_id: std::sync::RwLock::new(Some(repository_id)),
+            mutation_gate,
+            ..Self::default()
+        }
+    }
+
+    pub fn set_repository_id(&self, repository_id: Option<String>) {
+        *self
+            .repository_id
+            .write()
+            .expect("repository identity lock") = repository_id;
+    }
+
+    pub fn repository_id(&self) -> Option<String> {
+        self.repository_id
+            .read()
+            .expect("repository identity lock")
+            .clone()
+    }
+
+    fn operation_repository_id(&self, path: &Path) -> String {
+        self.repository_id
+            .read()
+            .expect("repository identity lock")
+            .clone()
+            .unwrap_or_else(|| path.to_string_lossy().into_owned())
+    }
+
     pub fn active_session_id(&self) -> u64 {
         self.session_id.load(Ordering::SeqCst)
+    }
+
+    pub async fn info(&self) -> Result<RepositoryInfo, AppError> {
+        let (path, generation) = self.snapshot().await?;
+        let (branch, head) = repository::read_identity(&self.git, &path).await?;
+        self.ensure_generation(generation)?;
+        Ok(RepositoryInfo {
+            path: path.to_string_lossy().into_owned(),
+            branch,
+            head,
+            open_duration_ms: 0,
+            session_id: self.active_session_id(),
+            watch_warning: None,
+        })
     }
     async fn snapshot(&self) -> Result<(PathBuf, u64), AppError> {
         let current = self.repository.lock().await;
@@ -550,7 +606,10 @@ impl WorkingTree {
         self.cancel_active_remote().await;
         let mut current = self.repository.lock().await;
         self.generation.fetch_add(1, Ordering::SeqCst);
-        self.session_id.fetch_add(1, Ordering::SeqCst);
+        self.session_id.store(
+            NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1,
+            Ordering::SeqCst,
+        );
         *current = None;
         let mut info = repository::open(&self.git, path).await?;
         info.session_id = self.session_id.load(Ordering::SeqCst);
@@ -562,7 +621,10 @@ impl WorkingTree {
         self.cancel_active_remote().await;
         let mut current = self.repository.lock().await;
         self.generation.fetch_add(1, Ordering::SeqCst);
-        self.session_id.fetch_add(1, Ordering::SeqCst);
+        self.session_id.store(
+            NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst) + 1,
+            Ordering::SeqCst,
+        );
         *current = None;
     }
 
@@ -574,6 +636,7 @@ impl WorkingTree {
         read_branches: bool,
         previous_head: Option<&str>,
     ) -> Result<crate::watcher::ValidatedState, AppError> {
+        let _mutation = self.mutation_gate.lock().await;
         let current = self.repository.lock().await;
         if self.session_id.load(Ordering::SeqCst) != session_id {
             return Err(AppError::new(
@@ -663,15 +726,16 @@ impl WorkingTree {
         F: Future<Output = Result<T, AppError>>,
     {
         self.cancel_background_remote().await;
+        let _mutation = self.mutation_gate.lock().await;
         let (path, _) = self.snapshot().await?;
-        let id = self.next_operation_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let id = NEXT_OPERATION_ID.fetch_add(1, Ordering::SeqCst) + 1;
         let started = Instant::now();
         self.active_user_operations.fetch_add(1, Ordering::SeqCst);
         let _guard = UserOperationGuard(&self.active_user_operations);
         self.operation_log
             .begin(
                 id,
-                path.to_string_lossy().into_owned(),
+                self.operation_repository_id(&path),
                 kind,
                 OperationSource::User,
             )
@@ -807,7 +871,7 @@ impl WorkingTree {
                 "Another remote operation is already running.",
             ));
         }
-        let id = self.next_operation_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let id = NEXT_OPERATION_ID.fetch_add(1, Ordering::SeqCst) + 1;
         let (cancel, receiver) = watch::channel(false);
         let status = RemoteOperationStatus {
             id,
@@ -834,7 +898,7 @@ impl WorkingTree {
         self.operation_log
             .begin(
                 id,
-                path.to_string_lossy().into_owned(),
+                self.operation_repository_id(&path),
                 match kind {
                     RemoteKind::Fetch => "Fetch",
                     RemoteKind::Pull => "Pull",
@@ -912,6 +976,7 @@ impl WorkingTree {
         remote: Option<String>,
         cancelled: watch::Receiver<bool>,
     ) {
+        let _mutation = self.mutation_gate.lock().await;
         let started = Instant::now();
         let source = self
             .remote_status(id)

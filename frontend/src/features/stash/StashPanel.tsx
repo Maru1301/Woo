@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from "react";
+import { useRepositoryViewActive, useRepositoryViewId } from "../../app/repository-session/RepositoryView";
 import { applyStash, createStash, dropStash, getStashes, messageForError, popStash, type StashList, type StashMutationResult } from "../../lib/repository";
 
-export default function StashPanel({ busy, onBusyChange, onMutation, onInconsistent }: {
+export default function StashPanel({ busy, onBusyChange, onMutation, onInconsistent, refreshToken = 0 }: {
   busy: boolean;
   onBusyChange: (busy: boolean) => void;
   onMutation: (result: StashMutationResult) => void;
   onInconsistent: (message: string) => void;
+  refreshToken?: number;
 }) {
+  const repositoryId = useRepositoryViewId();
+  const viewActive = useRepositoryViewActive();
   const [list, setList] = useState<StashList | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -16,16 +20,20 @@ export default function StashPanel({ busy, onBusyChange, onMutation, onInconsist
   const alive = useRef(true);
   const request = useRef(0);
   const locked = useRef(false);
+  const previousRefresh = useRef(refreshToken);
   useEffect(() => {
-    alive.current = true;
-    void getStashes().then((result) => { if (alive.current) setList(result); }, (cause) => { if (alive.current) setError(messageForError(cause)); });
+    alive.current = viewActive;
+    if (viewActive && (list === null || previousRefresh.current !== refreshToken)) {
+      previousRefresh.current = refreshToken;
+      void refresh();
+    }
     return () => { alive.current = false; request.current += 1; };
-  }, []);
+  }, [viewActive, refreshToken]);
   async function refresh() {
     const id = ++request.current;
     setError("");
     try {
-      const result = await getStashes();
+      const result = await getStashes(repositoryId);
       if (alive.current && id === request.current) setList(result);
     } catch (cause) {
       if (alive.current && id === request.current) setError(messageForError(cause));
@@ -62,14 +70,14 @@ export default function StashPanel({ busy, onBusyChange, onMutation, onInconsist
   return <section className="management-panel" aria-label="Stashes">
     <div className="management-heading"><div><p className="eyebrow">LOCAL CHANGES</p><h2>Stashes</h2></div><button className="secondary" disabled={busy || !!working} onClick={() => void refresh()}>Refresh</button></div>
     <p className="management-hint">Stash tracked and staged changes. Untracked files stay in the working tree.</p>
-    <form className="management-form" onSubmit={(event) => { event.preventDefault(); void mutate("Stashing", () => createStash(message || null)); }}><input aria-label="Stash message" placeholder="Optional stash message" value={message} onChange={(event) => setMessage(event.target.value)} disabled={busy || !!working} /><button disabled={busy || !!working}>Stash changes</button></form>
+    <form className="management-form" onSubmit={(event) => { event.preventDefault(); void mutate("Stashing", () => createStash(repositoryId, message || null)); }}><input aria-label="Stash message" placeholder="Optional stash message" value={message} onChange={(event) => setMessage(event.target.value)} disabled={busy || !!working} /><button disabled={busy || !!working}>Stash changes</button></form>
     {list === null && !error && <p className="status-placeholder">Loading stashes…</p>}
     {list?.stashes.length === 0 && <p className="empty-group">No stashes</p>}
     {list && list.stashes.length > 0 && <div className="management-list">{list.stashes.map((stash) => <div className="management-row" key={stash.commitHash}>
       <div className="management-description"><strong>{stash.message}</strong><small>{stash.reference} · {stash.commitHash.slice(0, 8)}</small></div>
-      <button className="secondary" disabled={busy || !!working} onClick={() => void mutate("Applying stash", () => applyStash(stash.commitHash))}>Apply</button>
-      <button className="secondary" disabled={busy || !!working} onClick={() => void mutate("Popping stash", () => popStash(stash.commitHash))}>Pop</button>
-      <button className="secondary" disabled={busy || !!working} onClick={() => { if (confirmDrop === stash.commitHash) void mutate("Dropping stash", () => dropStash(stash.commitHash)); else setConfirmDrop(stash.commitHash); }}>{confirmDrop === stash.commitHash ? "Confirm drop" : "Drop"}</button>
+      <button className="secondary" disabled={busy || !!working} onClick={() => void mutate("Applying stash", () => applyStash(repositoryId, stash.commitHash))}>Apply</button>
+      <button className="secondary" disabled={busy || !!working} onClick={() => void mutate("Popping stash", () => popStash(repositoryId, stash.commitHash))}>Pop</button>
+      <button className="secondary" disabled={busy || !!working} onClick={() => { if (confirmDrop === stash.commitHash) void mutate("Dropping stash", () => dropStash(repositoryId, stash.commitHash)); else setConfirmDrop(stash.commitHash); }}>{confirmDrop === stash.commitHash ? "Confirm drop" : "Drop"}</button>
     </div>)}</div>}
     {working && <p className="operation-feedback" role="status">{working}…</p>}
     {error && <p className="error" role="alert">{error}</p>}

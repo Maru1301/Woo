@@ -20,6 +20,7 @@ export interface RepositorySessionState {
 
 type SessionAction =
   | { type: "reset" }
+  | { type: "restore"; session: RepositorySessionState }
   | { type: "opened"; repository: RepositoryInfo }
   | { type: "statusLoading" }
   | { type: "statusError"; message: string; clearOperation?: boolean }
@@ -47,6 +48,7 @@ const initialState: RepositorySessionState = {
 function repositorySessionReducer(state: RepositorySessionState, action: SessionAction): RepositorySessionState {
   switch (action.type) {
     case "reset": return initialState;
+    case "restore": return action.session;
     case "opened": return { ...state, repository: action.repository };
     case "watchIdentity": return { ...state, repository: state.repository && { ...state.repository, branch: action.branch, head: action.head } };
     case "statusLoading": return { ...state, status: { phase: "loading", data: null } };

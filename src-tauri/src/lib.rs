@@ -10,6 +10,7 @@ pub mod operation_log;
 pub mod partial_stage;
 pub mod remotes;
 pub mod repository;
+pub mod repository_registry;
 pub mod stash;
 pub mod status;
 pub mod tags;
@@ -27,6 +28,7 @@ use operation_log::OperationEntry;
 use partial_stage::PartialSelection;
 use remotes::RemoteList;
 use repository::RepositoryInfo;
+use repository_registry::RepositoryRegistry;
 use stash::StashList;
 use status::{FileChange, RepositoryStatus};
 use std::sync::Arc;
@@ -42,39 +44,64 @@ use workspace::{WorkspaceCatalog, WorkspaceManager};
 
 #[tauri::command]
 async fn get_operation_history(
+    registry: State<'_, Arc<RepositoryRegistry>>,
     state: State<'_, Arc<WorkingTree>>,
 ) -> Result<Vec<OperationEntry>, AppError> {
-    Ok(state.operation_history().await)
+    let mut entries = registry.operation_history().await;
+    entries.extend(state.operation_history().await);
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.started_at_ms));
+    Ok(entries)
 }
 
 #[tauri::command]
 async fn get_repository_state(
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<RepositoryState, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.repository_state().await
 }
 
 #[tauri::command]
+async fn get_repository_info(
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<RepositoryInfo, AppError> {
+    registry.resolve(&repository_id).await?.info().await
+}
+
+#[tauri::command]
 async fn revalidate_repository(
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
     watcher: State<'_, Arc<RepositoryWatchManager>>,
 ) -> Result<(), AppError> {
-    watcher.revalidate().await;
+    registry
+        .resolve(&repository_id)
+        .await?
+        .repository_state()
+        .await?;
+    watcher.revalidate(&repository_id).await;
     Ok(())
 }
 
 #[tauri::command]
 async fn get_conflict_content(
     path: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<ConflictContent, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.conflict_content(&path).await
 }
 
 #[tauri::command]
 async fn merge_branch(
     full_ref: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<MergeMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Merge", state.merge_branch(&full_ref))
         .await
@@ -83,23 +110,31 @@ async fn merge_branch(
 #[tauri::command]
 async fn complete_merge(
     message: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<MergeMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Complete merge", state.complete_merge(&message))
         .await
 }
 
 #[tauri::command]
-async fn abort_merge(state: State<'_, Arc<WorkingTree>>) -> Result<MergeMutationResult, AppError> {
+async fn abort_merge(
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<MergeMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.logged_user("Abort merge", state.abort_merge()).await
 }
 
 #[tauri::command]
 async fn rebase_onto(
     full_ref: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<HistoryMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Rebase", state.rebase_onto(&full_ref))
         .await
@@ -108,8 +143,10 @@ async fn rebase_onto(
 #[tauri::command]
 async fn cherry_pick(
     commit: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<HistoryMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Cherry-pick", state.cherry_pick(&commit))
         .await
@@ -118,8 +155,10 @@ async fn cherry_pick(
 #[tauri::command]
 async fn revert_commit(
     commit: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<HistoryMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Revert", state.revert_commit(&commit))
         .await
@@ -129,8 +168,10 @@ async fn revert_commit(
 async fn reset_to(
     commit: String,
     mode: ResetMode,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<HistoryMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Reset", state.reset_to(&commit, mode))
         .await
@@ -138,8 +179,10 @@ async fn reset_to(
 
 #[tauri::command]
 async fn continue_history_operation(
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<HistoryMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Continue operation", state.continue_history_operation())
         .await
@@ -147,8 +190,10 @@ async fn continue_history_operation(
 
 #[tauri::command]
 async fn skip_history_operation(
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<HistoryMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Skip operation", state.skip_history_operation())
         .await
@@ -156,8 +201,10 @@ async fn skip_history_operation(
 
 #[tauri::command]
 async fn abort_history_operation(
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<HistoryMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Abort operation", state.abort_history_operation())
         .await
@@ -168,8 +215,10 @@ async fn save_conflict_text(
     path: String,
     expected: Option<String>,
     text: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<ConflictMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user(
             "Save conflict resolution",
@@ -182,8 +231,10 @@ async fn save_conflict_text(
 async fn use_conflict_side(
     path: String,
     side: ConflictSide,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<ConflictMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Resolve conflict", state.use_conflict_side(&path, side))
         .await
@@ -192,8 +243,10 @@ async fn use_conflict_side(
 #[tauri::command]
 async fn stage_conflict(
     path: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<ConflictMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Stage resolved conflict", state.stage_conflict(&path))
         .await
@@ -202,8 +255,10 @@ async fn stage_conflict(
 #[tauri::command]
 async fn delete_conflict(
     path: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<ConflictMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Resolve conflict as deleted", state.delete_conflict(&path))
         .await
@@ -213,8 +268,10 @@ async fn delete_conflict(
 async fn rename_branch(
     full_ref: String,
     new_name: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<BranchRefMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Rename branch", state.rename_branch(&full_ref, &new_name))
         .await
@@ -223,23 +280,31 @@ async fn rename_branch(
 #[tauri::command]
 async fn delete_branch(
     full_ref: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<BranchRefMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Delete branch", state.delete_branch(&full_ref))
         .await
 }
 
 #[tauri::command]
-async fn get_stashes(state: State<'_, Arc<WorkingTree>>) -> Result<StashList, AppError> {
+async fn get_stashes(
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<StashList, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.stashes().await
 }
 
 #[tauri::command]
 async fn create_stash(
     message: Option<String>,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<StashMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Create stash", state.create_stash(message.as_deref()))
         .await
@@ -248,8 +313,10 @@ async fn create_stash(
 #[tauri::command]
 async fn apply_stash(
     hash: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<StashMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Apply stash", state.apply_stash(&hash))
         .await
@@ -258,23 +325,31 @@ async fn apply_stash(
 #[tauri::command]
 async fn pop_stash(
     hash: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<StashMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.logged_user("Pop stash", state.pop_stash(&hash)).await
 }
 
 #[tauri::command]
 async fn drop_stash(
     hash: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<StashMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Drop stash", state.drop_stash(&hash))
         .await
 }
 
 #[tauri::command]
-async fn get_tags(state: State<'_, Arc<WorkingTree>>) -> Result<TagList, AppError> {
+async fn get_tags(
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<TagList, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.tags().await
 }
 
@@ -283,8 +358,10 @@ async fn create_tag(
     name: String,
     annotation: Option<String>,
     target_hash: Option<String>,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<TagMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user(
             "Create tag",
@@ -296,8 +373,10 @@ async fn create_tag(
 #[tauri::command]
 async fn delete_tag(
     name: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<TagMutationResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Delete tag", state.delete_tag(&name))
         .await
@@ -305,57 +384,78 @@ async fn delete_tag(
 use working_tree::{RemoteKind, RemoteOperationStatus};
 
 #[tauri::command]
-async fn get_remotes(state: State<'_, Arc<WorkingTree>>) -> Result<RemoteList, AppError> {
+async fn get_remotes(
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<RemoteList, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.remotes().await
 }
 
 #[tauri::command]
 async fn start_fetch(
     remote: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<RemoteOperationStatus, AppError> {
-    state
-        .inner()
-        .start_remote(RemoteKind::Fetch, Some(&remote))
-        .await
+    let state = registry.resolve(&repository_id).await?;
+    state.start_remote(RemoteKind::Fetch, Some(&remote)).await
 }
 
 #[tauri::command]
-async fn start_pull(state: State<'_, Arc<WorkingTree>>) -> Result<RemoteOperationStatus, AppError> {
-    state.inner().start_remote(RemoteKind::Pull, None).await
+async fn start_pull(
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<RemoteOperationStatus, AppError> {
+    let state = registry.resolve(&repository_id).await?;
+    state.start_remote(RemoteKind::Pull, None).await
 }
 
 #[tauri::command]
-async fn start_push(state: State<'_, Arc<WorkingTree>>) -> Result<RemoteOperationStatus, AppError> {
-    state.inner().start_remote(RemoteKind::Push, None).await
+async fn start_push(
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<RemoteOperationStatus, AppError> {
+    let state = registry.resolve(&repository_id).await?;
+    state.start_remote(RemoteKind::Push, None).await
 }
 
 #[tauri::command]
 async fn get_remote_operation(
     id: u64,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<RemoteOperationStatus, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.remote_status(id).await
 }
 
 #[tauri::command]
 async fn cancel_remote_operation(
     id: u64,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<RemoteOperationStatus, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.cancel_remote(id).await
 }
 
 #[tauri::command]
-async fn get_branches(state: State<'_, Arc<WorkingTree>>) -> Result<BranchList, AppError> {
+async fn get_branches(
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<BranchList, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.branches().await
 }
 
 #[tauri::command]
 async fn create_branch(
     name: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<BranchList, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Create branch", state.create_branch(&name))
         .await
@@ -364,8 +464,10 @@ async fn create_branch(
 #[tauri::command]
 async fn checkout_branch(
     name: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<CheckoutResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Checkout", state.checkout_branch(&name))
         .await
@@ -389,9 +491,22 @@ async fn open_session(
     watcher: &RepositoryWatchManager,
     app: &AppHandle,
 ) -> Result<RepositoryInfo, AppError> {
+    let repository_id = app
+        .state::<Arc<WorkspaceManager>>()
+        .load()
+        .ok()
+        .and_then(|catalog| {
+            catalog
+                .workspaces
+                .into_iter()
+                .flat_map(|item| item.repositories)
+                .find(|item| item.path == path)
+                .map(|item| item.id)
+        });
     let background = app.state::<Arc<BackgroundFetchManager>>();
     background.stop(state).await;
     watcher.stop().await;
+    state.set_repository_id(repository_id);
     let mut info = state.open(path).await?;
     // The watcher needs the same session owner as Git commands.
     let tree = app.state::<Arc<WorkingTree>>();
@@ -601,49 +716,110 @@ async fn switch_workspace_repository(
 }
 
 #[tauri::command]
-async fn get_repository_status(
+async fn select_workspace_repository(
+    workspace_id: String,
+    repository_id: String,
+    workspace: State<'_, Arc<WorkspaceManager>>,
+) -> Result<WorkspaceCatalog, AppError> {
+    let _gate = workspace.gate.lock().await;
+    let mut catalog = workspace.load()?;
+    catalog.select_repository(&workspace_id, &repository_id)?;
+    workspace.save(&catalog)?;
+    Ok(catalog)
+}
+
+#[tauri::command]
+async fn activate_repository_watch(
+    repository_id: String,
+    workspace: State<'_, Arc<WorkspaceManager>>,
     state: State<'_, Arc<WorkingTree>>,
+    watcher: State<'_, Arc<RepositoryWatchManager>>,
+    app: AppHandle,
+) -> Result<RepositoryInfo, AppError> {
+    let _gate = workspace.gate.lock().await;
+    let catalog = workspace.load()?;
+    let active = catalog
+        .workspaces
+        .iter()
+        .find(|item| item.id == catalog.active_workspace_id.as_deref().unwrap_or_default())
+        .and_then(|item| item.active_repository_id.as_deref());
+    if active != Some(repository_id.as_str()) {
+        return Err(AppError::new(
+            "repository_selection_changed",
+            "The selected repository changed.",
+        ));
+    }
+    let path = catalog
+        .workspaces
+        .iter()
+        .flat_map(|item| &item.repositories)
+        .find(|item| item.id == repository_id)
+        .map(|item| item.path.clone())
+        .ok_or_else(|| {
+            AppError::new(
+                "workspace_repository_not_found",
+                "Repository is not registered in Woo.",
+            )
+        })?;
+    open_session(&path, &state, &watcher, &app).await
+}
+
+#[tauri::command]
+async fn get_repository_status(
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<RepositoryStatus, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.status().await
 }
 
 #[tauri::command]
 async fn get_commit_history(
     cursor: Option<String>,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<CommitHistoryPage, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.history(cursor.as_deref()).await
 }
 
 #[tauri::command]
 async fn get_unstaged_diff(
     change: FileChange,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<DiffFile, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.working_diff(false, false, change).await
 }
 
 #[tauri::command]
 async fn get_staged_diff(
     change: FileChange,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<DiffFile, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.working_diff(true, false, change).await
 }
 
 #[tauri::command]
 async fn get_untracked_diff(
     change: FileChange,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<DiffFile, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.working_diff(false, true, change).await
 }
 
 #[tauri::command]
 async fn get_commit_files(
     commit: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<Vec<FileChange>, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.commit_files(&commit).await
 }
 
@@ -651,8 +827,10 @@ async fn get_commit_files(
 async fn get_commit_diff(
     commit: String,
     change: FileChange,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<DiffFile, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.commit_diff(&commit, change).await
 }
 
@@ -660,8 +838,10 @@ async fn get_commit_diff(
 async fn stage_file(
     path: String,
     old_path: Option<String>,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<RepositoryStatus, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user("Stage file", state.stage_file(&path, old_path.as_deref()))
         .await
@@ -671,8 +851,10 @@ async fn stage_file(
 async fn unstage_file(
     path: String,
     old_path: Option<String>,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<RepositoryStatus, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user(
             "Unstage file",
@@ -682,12 +864,20 @@ async fn unstage_file(
 }
 
 #[tauri::command]
-async fn stage_all(state: State<'_, Arc<WorkingTree>>) -> Result<RepositoryStatus, AppError> {
+async fn stage_all(
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<RepositoryStatus, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.logged_user("Stage all", state.stage_all()).await
 }
 
 #[tauri::command]
-async fn unstage_all(state: State<'_, Arc<WorkingTree>>) -> Result<RepositoryStatus, AppError> {
+async fn unstage_all(
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<RepositoryStatus, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.logged_user("Unstage all", state.unstage_all()).await
 }
 
@@ -696,8 +886,10 @@ async fn partial_stage(
     path: String,
     staged: bool,
     selection: PartialSelection,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<working_tree::PartialStageResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state
         .logged_user(
             "Partial stage",
@@ -709,8 +901,10 @@ async fn partial_stage(
 #[tauri::command]
 async fn commit_staged(
     message: String,
-    state: State<'_, Arc<WorkingTree>>,
+    repository_id: String,
+    registry: State<'_, Arc<RepositoryRegistry>>,
 ) -> Result<CommitResult, AppError> {
+    let state = registry.resolve(&repository_id).await?;
     state.logged_user("Commit", state.commit(&message)).await
 }
 
@@ -718,12 +912,20 @@ async fn commit_staged(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(Arc::new(WorkingTree::default()))
         .manage(Arc::new(BackgroundFetchManager::default()))
         .manage(Arc::new(RepositoryWatchManager::default()))
         .setup(|app| {
             let config = app.path().app_config_dir()?;
-            app.manage(Arc::new(WorkspaceManager::new(config)));
+            let workspace = Arc::new(WorkspaceManager::new(config));
+            let mutation_gate = Arc::new(tokio::sync::Mutex::new(()));
+            app.manage(Arc::new(WorkingTree::with_shared_mutation_gate(
+                Arc::clone(&mutation_gate),
+            )));
+            app.manage(Arc::new(RepositoryRegistry::new(
+                Arc::clone(&workspace),
+                mutation_gate,
+            )));
+            app.manage(workspace);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -737,7 +939,10 @@ pub fn run() {
             remove_workspace_repository,
             switch_workspace,
             switch_workspace_repository,
+            select_workspace_repository,
+            activate_repository_watch,
             get_repository_state,
+            get_repository_info,
             revalidate_repository,
             get_conflict_content,
             merge_branch,

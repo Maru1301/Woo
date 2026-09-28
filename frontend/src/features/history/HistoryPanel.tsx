@@ -1,32 +1,58 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import DiffViewer from "../diff/DiffViewer";
+import { useRepositoryViewActive, useRepositoryViewId } from "../../app/repository-session/RepositoryView";
 import GraphRowView, { GRAPH_ROW_HEIGHT, graphWidth } from "./GraphRowView";
 import { FilePresentation, FileViewToggle, type FileViewMode } from "../changes/FilePresentation";
 import { ContextMenu } from "../../components/ui/ContextMenu";
-import { getCommitFiles, getCommitHistory, messageForError, type CommitHistoryPage, type CommitInfo, type FileChange, type GraphRow, type ResetMode } from "../../lib/repository";
+import { needsColdHistoryLoad, retainedCommitHash } from "../../app/repository-session/repositoryCache";
+import { getCommitFiles, getCommitHistory, messageForError, type CommitHistoryPage, type CommitInfo, type DiffFile, type FileChange, type GraphRow, type ResetMode } from "../../lib/repository";
 
 const ROW_HEIGHT = GRAPH_ROW_HEIGHT;
 const DEFAULT_VIEW_HEIGHT = 400;
 
-export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onAction, onTag, onBranch, currentHead, rebaseTargets = [], onRebase }: { refreshToken?: number; actionBusy?: boolean; onAction?: (action: "cherry_pick" | "revert" | "reset", hash: string, mode?: ResetMode) => Promise<void>; onTag?: (hash: string) => Promise<void>; onBranch?: (hash: string) => Promise<void>; currentHead?: string | null; rebaseTargets?: { name: string; hash: string }[]; onRebase?: (name: string) => Promise<void> }) {
-  const [history, setHistory] = useState<{ commits: CommitInfo[]; graphRows: GraphRow[] }>({ commits: [], graphRows: [] });
-  const [maxLanes, setMaxLanes] = useState(1);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [hasMore, setHasMore] = useState(true);
+export interface HistorySnapshot {
+  history: { commits: CommitInfo[]; graphRows: GraphRow[] };
+  pageLoaded: boolean;
+  maxLanes: number;
+  cursor: string | null;
+  hasMore: boolean;
+  selectedHash: string | null;
+  selectedSnapshot: CommitInfo | null;
+  commitFiles: FileChange[];
+  filesLoaded: boolean;
+  selectedFile: FileChange | null;
+  selectedDiff: DiffFile | null;
+  commitFilesMode: FileViewMode;
+  scrollTop: number;
+}
+
+export default function HistoryPanel({ refreshToken = 0, resetToken = 0, initialSnapshot, onSnapshot, enabled: requestedEnabled = true, actionBusy: requestedActionBusy = false, onAction, onTag, onBranch, currentHead, rebaseTargets = [], onRebase }: { refreshToken?: number; resetToken?: number; initialSnapshot?: HistorySnapshot | null; onSnapshot?: (snapshot: HistorySnapshot) => void; enabled?: boolean; actionBusy?: boolean; onAction?: (action: "cherry_pick" | "revert" | "reset", hash: string, mode?: ResetMode) => Promise<void>; onTag?: (hash: string) => Promise<void>; onBranch?: (hash: string) => Promise<void>; currentHead?: string | null; rebaseTargets?: { name: string; hash: string }[]; onRebase?: (name: string) => Promise<void> }) {
+  const repositoryId = useRepositoryViewId();
+  const viewActive = useRepositoryViewActive();
+  const enabled = requestedEnabled && viewActive;
+  const actionBusy = requestedActionBusy || !enabled;
+  const [history, setHistory] = useState<{ commits: CommitInfo[]; graphRows: GraphRow[] }>(initialSnapshot?.history ?? { commits: [], graphRows: [] });
+  const [pageLoaded, setPageLoaded] = useState(initialSnapshot?.pageLoaded ?? false);
+  const [maxLanes, setMaxLanes] = useState(initialSnapshot?.maxLanes ?? 1);
+  const [cursor, setCursor] = useState<string | null>(initialSnapshot?.cursor ?? null);
+  const [hasMore, setHasMore] = useState(initialSnapshot?.hasMore ?? true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [selectedHash, setSelectedHash] = useState<string | null>(null);
-  const [selectedSnapshot, setSelectedSnapshot] = useState<CommitInfo | null>(null);
-  const [commitFiles, setCommitFiles] = useState<FileChange[]>([]);
+  const [selectedHash, setSelectedHash] = useState<string | null>(initialSnapshot?.selectedHash ?? null);
+  const [selectedSnapshot, setSelectedSnapshot] = useState<CommitInfo | null>(initialSnapshot?.selectedSnapshot ?? null);
+  const [commitFiles, setCommitFiles] = useState<FileChange[]>(initialSnapshot?.commitFiles ?? []);
+  const [filesLoaded, setFilesLoaded] = useState(initialSnapshot?.filesLoaded ?? false);
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState("");
-  const [selectedFile, setSelectedFile] = useState<FileChange | null>(null);
-  const [commitFilesMode, setCommitFilesMode] = useState<FileViewMode>("list");
+  const [selectedFile, setSelectedFile] = useState<FileChange | null>(initialSnapshot?.selectedFile ?? null);
+  const [selectedDiff, setSelectedDiff] = useState<DiffFile | null>(initialSnapshot?.selectedDiff ?? null);
+  const [commitFilesMode, setCommitFilesMode] = useState<FileViewMode>(initialSnapshot?.commitFilesMode ?? "list");
   const [commitMenu, setCommitMenu] = useState<{ x: number; y: number; commit: CommitInfo } | null>(null);
   const [resetTarget, setResetTarget] = useState<string | null>(null);
-  const [scrollTop, setScrollTop] = useState(0);
+  const [scrollTop, setScrollTop] = useState(initialSnapshot?.scrollTop ?? 0);
   const [viewHeight, setViewHeight] = useState(DEFAULT_VIEW_HEIGHT);
   const [reload, setReload] = useState(0);
+  const [softReload, setSoftReload] = useState(0);
   const [resetMode, setResetMode] = useState<ResetMode>("mixed");
   const [confirmHard, setConfirmHard] = useState(false);
   const [actionError, setActionError] = useState("");
@@ -37,9 +63,22 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
   const nextCursor = useRef<string | null>(null);
   const more = useRef(true);
   const previousRefresh = useRef(refreshToken);
+  const previousReset = useRef(resetToken);
+  const mountedFromCache = useRef(!needsColdHistoryLoad(initialSnapshot));
+  const previousReload = useRef(reload);
+  const previousSoftReload = useRef(softReload);
   const scrollElement = useRef<HTMLDivElement>(null);
+  const selectedHashRef = useRef(selectedHash);
+  selectedHashRef.current = selectedHash;
+  const onSnapshotRef = useRef(onSnapshot);
+  onSnapshotRef.current = onSnapshot;
+  useEffect(() => {
+    onSnapshotRef.current?.({ history, pageLoaded, maxLanes, cursor, hasMore, selectedHash, selectedSnapshot, commitFiles, filesLoaded, selectedFile, selectedDiff, commitFilesMode, scrollTop });
+  }, [history, pageLoaded, maxLanes, cursor, hasMore, selectedHash, selectedSnapshot, commitFiles, filesLoaded, selectedFile, selectedDiff, commitFilesMode, scrollTop]);
+  useEffect(() => { if (scrollElement.current) scrollElement.current.scrollTop = scrollTop; }, []);
 
   useEffect(() => {
+    if (!enabled) return;
     const element = scrollElement.current;
     if (!element) return;
     const update = () => setViewHeight(element.clientHeight || DEFAULT_VIEW_HEIGHT);
@@ -47,22 +86,40 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
     const observer = new ResizeObserver(update);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [history.commits.length > 0]);
+  }, [history.commits.length > 0, enabled]);
 
-  async function loadPage(requestCursor: string | null) {
-    if (requestActive.current || !more.current) return;
+  async function loadPage(requestCursor: string | null, anchorHash?: string | null) {
+    if (!enabled || requestActive.current || !more.current) return;
     requestActive.current = true;
     const requestEpoch = epoch.current;
     setLoading(true);
     setError("");
     try {
-      const page: CommitHistoryPage = await getCommitHistory(requestCursor);
+      const page: CommitHistoryPage = await getCommitHistory(repositoryId, requestCursor);
       if (!alive.current || epoch.current !== requestEpoch) return;
       if (page.commits.length !== page.graphRows.length) throw new Error("History and graph rows are out of sync. Reload history.");
+      // A selected deep commit may remain valid even though page one changed.
+      // Verify it only when the replacement page does not contain it.
+      const selectedAtStart = requestCursor === null ? selectedHashRef.current : null;
+      let selectedStillExists = false;
+      if (selectedAtStart && !page.commits.some((commit) => commit.hash === selectedAtStart)) {
+        try { await getCommitFiles(repositoryId, selectedAtStart); selectedStillExists = true; } catch { /* The old commit is no longer accessible. */ }
+        if (!alive.current || epoch.current !== requestEpoch) return;
+      }
       setHistory((current) => requestCursor === null
         ? { commits: page.commits, graphRows: page.graphRows }
         : { commits: [...current.commits, ...page.commits], graphRows: [...current.graphRows, ...page.graphRows] });
-      if (requestCursor === null) setSelectedSnapshot((current) => current ? page.commits.find((commit) => commit.hash === current.hash) ?? current : null);
+      if (requestCursor === null) setPageLoaded(true);
+      if (requestCursor === null) {
+        const pageHashes = page.commits.map((commit) => commit.hash);
+        setSelectedHash((current) => retainedCommitHash(current, pageHashes, selectedAtStart, selectedStillExists));
+        setSelectedSnapshot((current) => current && retainedCommitHash(current.hash, pageHashes, selectedAtStart, selectedStillExists)
+          ? page.commits.find((commit) => commit.hash === current.hash) ?? current : null);
+        const anchorIndex = anchorHash ? page.commits.findIndex((commit) => commit.hash === anchorHash) : -1;
+        const top = anchorIndex >= 0 ? anchorIndex * ROW_HEIGHT : Math.min(scrollTop, Math.max(0, page.commits.length - 1) * ROW_HEIGHT);
+        setScrollTop(top);
+        if (scrollElement.current) scrollElement.current.scrollTop = top;
+      }
       setMaxLanes((current) => Math.max(requestCursor === null ? 1 : current, ...page.graphRows.map((row) => row.laneCount)));
       nextCursor.current = page.nextCursor;
       more.current = page.hasMore;
@@ -80,11 +137,31 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
 
   useEffect(() => {
     alive.current = true;
+    if (!enabled) {
+      // A page request from the previous active period is now obsolete. Keep
+      // the last committed pagination position for the next activation.
+      requestActive.current = false;
+      nextCursor.current = cursor;
+      more.current = hasMore;
+      setLoading(false);
+      return () => { alive.current = false; epoch.current += 1; };
+    }
+    if (mountedFromCache.current) {
+      mountedFromCache.current = false;
+      nextCursor.current = initialSnapshot!.cursor;
+      more.current = initialSnapshot!.hasMore;
+      return () => { alive.current = false; epoch.current += 1; };
+    }
+    if (pageLoaded && previousReload.current === reload) {
+      return () => { alive.current = false; epoch.current += 1; };
+    }
+    previousReload.current = reload;
     epoch.current += 1;
     requestActive.current = false;
     more.current = true;
     nextCursor.current = null;
     setHistory({ commits: [], graphRows: [] });
+    setPageLoaded(false);
     setMaxLanes(1);
     setCursor(null);
     setHasMore(true);
@@ -93,42 +170,43 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
     setCommitMenu(null);
     setConfirmHard(false); setActionError("");
     setScrollTop(0);
-    void loadPage(null);
+    if (enabled) void loadPage(null);
     return () => { alive.current = false; epoch.current += 1; };
-  }, [reload]);
+  }, [reload, enabled]);
 
-  // Fetch can move remote refs. Reload page one and graph topology, while
-  // retaining the selected commit's metadata/diff until the user selects anew.
+  // Keep the old page visible until Git and the graph have produced a coherent replacement.
   useEffect(() => {
-    if (previousRefresh.current === refreshToken) return;
+    if (!enabled) return;
+    if (previousRefresh.current === refreshToken && previousReset.current === resetToken && previousSoftReload.current === softReload) return;
     previousRefresh.current = refreshToken;
+    previousReset.current = resetToken;
+    previousSoftReload.current = softReload;
     epoch.current += 1;
     requestActive.current = false;
     more.current = true;
     nextCursor.current = null;
-    setHistory({ commits: [], graphRows: [] });
-    setMaxLanes(1);
-    setCursor(null);
-    setHasMore(true);
-    setScrollTop(0);
     setCommitMenu(null);
-    setSelectedSnapshot((current) => current ? { ...current, refs: [] } : null);
-    if (scrollElement.current) scrollElement.current.scrollTop = 0;
-    void loadPage(null);
-  }, [refreshToken]);
+    void loadPage(null, history.commits[Math.floor(scrollTop / ROW_HEIGHT)]?.hash);
+  }, [refreshToken, resetToken, softReload, enabled]);
 
   useEffect(() => {
     let cancelled = false;
+    if (!enabled) return;
+    // A kept-alive panel already owns its selected commit files. Re-enabling
+    // it must not clear the file selection or reload the immutable commit.
+    if (selectedHash && filesLoaded && selectedSnapshot?.hash === selectedHash) return;
     setCommitFiles([]);
+    setFilesLoaded(false);
     setSelectedFile(null);
+    setSelectedDiff(null);
     setFilesError("");
-    if (!selectedHash) { setFilesLoading(false); return; }
+    if (!selectedHash) { setFilesLoading(false); setFilesLoaded(true); return; }
     setFilesLoading(true);
-    void getCommitFiles(selectedHash).then((files) => { if (!cancelled) setCommitFiles(files); })
+    void getCommitFiles(repositoryId, selectedHash).then((files) => { if (!cancelled) { setCommitFiles(files); setFilesLoaded(true); } })
       .catch((cause) => { if (!cancelled) setFilesError(messageForError(cause)); })
       .finally(() => { if (!cancelled) setFilesLoading(false); });
     return () => { cancelled = true; };
-  }, [selectedHash]);
+  }, [selectedHash, enabled]);
 
   const { commits, graphRows } = history;
   const graphColumnWidth = Math.max(96, graphWidth(maxLanes));
@@ -156,7 +234,9 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
     setSelectedHash(commit.hash);
     setSelectedSnapshot(commit);
     setCommitFiles([]);
+    setFilesLoaded(false);
     setSelectedFile(null);
+    setSelectedDiff(null);
     setFilesLoading(true);
     setConfirmHard(false);
     setActionError("");
@@ -164,7 +244,7 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
 
   return <section className="history-panel" aria-label="Commit history">
     <div className="woo-history-master">
-    <div className="history-heading"><div><p className="eyebrow">HISTORY</p><h2>Commits</h2></div><button className="secondary" disabled={loading} onClick={() => setReload((value) => value + 1)}>Reload</button></div>
+    <div className="history-heading"><div><p className="eyebrow">HISTORY</p><h2>Commits</h2></div><button className="secondary" disabled={loading || !enabled} onClick={() => { if (history.commits.length) setSoftReload((value) => value + 1); else setReload((value) => value + 1); }}>Reload</button></div>
     {actionError && !resetTarget && <p className="error" role="alert">{actionError}</p>}
     <div className="woo-history-listhead" style={{ "--woo-graph-column": `${graphColumnWidth}px` } as CSSProperties}><span>Graph</span><span>Commit</span><span>Author</span><span>Date</span></div>
     {commits.length === 0 && loading && <p className="status-placeholder">Loading recent commits…</p>}
@@ -179,8 +259,8 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
         </button>)}
       </div>
     </div>}
-    <div className="history-paging">{loading && <span role="status">Loading older commits…</span>}{!loading && hasMore && commits.length > 0 && <button className="secondary" onClick={() => void loadPage(cursor)}>Load older</button>}{!hasMore && commits.length > 0 && <span>End of history</span>}</div>
-    {error && <p className="error" role="alert">{error} <button className="secondary" onClick={() => setReload((value) => value + 1)}>Reload history</button></p>}
+    <div className="history-paging">{loading && <span role="status">Loading older commits…</span>}{!loading && hasMore && commits.length > 0 && <button className="secondary" disabled={!enabled} onClick={() => void loadPage(cursor)}>Load older</button>}{!hasMore && commits.length > 0 && <span>End of history</span>}</div>
+    {error && <p className="error" role="alert">{error} <button className="secondary" disabled={!enabled} onClick={() => { if (history.commits.length) setSoftReload((value) => value + 1); else setReload((value) => value + 1); }}>Reload history</button></p>}
     </div>
     {selected && <div className="commit-details"><h3>Commit details</h3><dl>
       <div><dt>Subject</dt><dd>{selected.subject || "(no subject)"}</dd></div>
@@ -195,9 +275,9 @@ export default function HistoryPanel({ refreshToken = 0, actionBusy = false, onA
         {selected.parentHashes.length === 0 && <p className="commit-compare-note">Initial commit, compared with an empty tree.</p>}
         {filesError && <p className="error" role="alert">{filesError}</p>}
         {!filesLoading && !filesError && commitFiles.length === 0 && <p className="status-placeholder">No file changes against {selected.parentHashes.length > 1 ? "the first parent" : "this commit's parent"}.</p>}
-        {commitFiles.length > 0 && <FilePresentation files={commitFiles} mode={commitFilesMode} selectedPath={selectedFile?.path} onSelect={setSelectedFile} maxHeight={238} />}
+        {commitFiles.length > 0 && <FilePresentation files={commitFiles} mode={commitFilesMode} selectedPath={selectedFile?.path} onSelect={(file) => { setSelectedFile(file); setSelectedDiff(null); }} maxHeight={238} />}
       </div>
-      {selectedFile && <DiffViewer key={`${selected.hash}:${selectedFile.path}:${selectedFile.oldPath ?? ""}`} source="commit" commit={selected.hash} change={selectedFile} />}
+      {selectedFile && <DiffViewer key={`${selected.hash}:${selectedFile.path}:${selectedFile.oldPath ?? ""}`} source="commit" commit={selected.hash} change={selectedFile} enabled={enabled} initialDiff={selectedDiff} onDiff={setSelectedDiff} />}
     </div>}
     {!selected && <div className="commit-details woo-history-empty"><p>Select a commit to inspect its files and diff.</p></div>}
     {commitMenu && <ContextMenu x={commitMenu.x} y={commitMenu.y} title={`${commitMenu.commit.hash.slice(0, 10)} · ${commitMenu.commit.subject}`} onClose={() => setCommitMenu(null)} actions={[

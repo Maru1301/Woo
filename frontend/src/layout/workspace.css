@@ -8,10 +8,13 @@ html,body,#root{height:100%;min-height:0}body{min-width:0;overflow:hidden}
 .woo-toolbar-spacer{flex:1;min-width:8px}.woo-open-button{white-space:nowrap}
 .woo-tabs{min-width:0;display:flex;align-items:end;gap:3px;padding:0 8px;background:var(--woo-chrome);border-bottom:1px solid var(--woo-line)}
 .woo-repo-tab{max-width:240px;min-width:120px;height:31px;display:flex;align-items:center;gap:7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 10px;border-radius:6px 6px 0 0;background:#18212d;color:#fff;font-size:12px}.woo-repo-tab-empty{background:transparent;color:var(--woo-muted)}.woo-dirty{color:#e9b75e}
-.woo-main{min-width:0;min-height:0;display:grid;grid-template-columns:210px minmax(0,1fr);overflow:hidden}.woo-main:not(:has(.woo-sidebar)){grid-template-columns:1fr}
+.woo-main{min-width:0;min-height:0;display:grid;grid-template-columns:210px minmax(0,1fr);overflow:hidden}.woo-main:has(.woo-sidebar[hidden]){grid-template-columns:1fr}.woo-sidebar[hidden]{display:none!important}
 .woo-sidebar{min-width:0;min-height:0;overflow:auto;padding:8px;background:var(--woo-chrome);border-right:1px solid var(--woo-line);scrollbar-color:#34465c var(--woo-chrome)}
 .woo-nav{display:grid;gap:2px}.woo-nav button{display:flex;align-items:center;gap:8px;width:100%;padding:8px 9px;border:0;border-radius:6px;background:transparent;color:#a6b2c1;text-align:left;font-size:12px;font-weight:500}.woo-nav button:hover:not(:disabled){background:#171f2a}.woo-nav button.active{background:#1c2b3d;color:white}.woo-count{margin-left:auto;padding:1px 6px;border-radius:10px;background:#283445;font-size:10px}
 .woo-workspace{width:auto;min-width:0;min-height:0;height:100%;margin:0;overflow:hidden;display:block;background:var(--woo-panel)}
+.woo-repository-view{width:100%;height:100%;min-width:0;min-height:0;overflow:hidden}
+.woo-repository-view[hidden],.woo-remote-view[hidden],.woo-sidebar-view[hidden]{display:none!important}
+.woo-remote-view{height:100%}
 .woo-view{min-width:0;min-height:0;height:100%}.woo-view[hidden]{display:none!important}
 .woo-statusbar{min-width:0;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 9px;border-top:1px solid var(--woo-line);background:var(--woo-chrome);color:#8392a5;font-size:10px}.woo-statusbar span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .woo-settings{position:relative}.woo-settings-button{width:30px;height:29px;padding:0!important;font-size:17px!important}.woo-settings-menu{position:absolute;right:0;top:35px;z-index:30;width:220px;padding:7px;border:1px solid #344255;border-radius:8px;background:#18212c;box-shadow:0 14px 35px #0009}.woo-settings-menu p{margin:5px 7px;color:#8291a4;font-size:10px;letter-spacing:.08em}.woo-settings-menu button{display:block;width:100%;border:0;text-align:left;background:transparent}.woo-settings-menu button.active{background:#243246;color:#fff}

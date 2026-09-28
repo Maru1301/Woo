@@ -5,7 +5,7 @@ export type WorkspaceView = "history" | "changes" | "branches" | "tags" | "stash
 type DetailPosition = "right" | "bottom";
 type SizePreset = "balanced" | "history" | "detail";
 
-export function WorkspaceLayout({ repository, repositoryError, activeView, onViewChange, onOpen, openDisabled, remoteControls, workspaceName, workspaceMenu, repositoryTabs, activity, sidebar, changeCount, busy, children }: {
+export function WorkspaceLayout({ repository, repositoryError, activeView, onViewChange, onOpen, openDisabled, remoteControls, workspaceName, workspaceMenu, repositoryTabs, activity, sidebar, changeCount, tracking, busy, children }: {
   repository: RepositoryInfo | null;
   repositoryError?: string;
   activeView: WorkspaceView;
@@ -19,6 +19,7 @@ export function WorkspaceLayout({ repository, repositoryError, activeView, onVie
   activity: (open: boolean) => ReactNode;
   sidebar?: ReactNode;
   changeCount: number;
+  tracking?: { ahead: number | null; behind: number | null };
   busy: string | null;
   children: ReactNode;
 }) {
@@ -75,15 +76,15 @@ export function WorkspaceLayout({ repository, repositoryError, activeView, onVie
     <div className="woo-tabs" aria-label="Workspace repositories">{repositoryTabs}<button type="button" className="woo-tab-add" onClick={onOpen} disabled={openDisabled} title="Add repository to workspace">+</button></div>
     {repository && (repositoryError || repository.watchWarning) && <p className="error woo-repository-alert" role="alert">{repositoryError || `Auto refresh unavailable: ${repository.watchWarning}. Use Refresh to update repository state.`}</p>}
     <div className="woo-main">
-      {repository && <aside className="woo-sidebar" aria-label="Repository navigation">
+      <aside className="woo-sidebar" aria-label="Repository navigation" hidden={!repository}>
         <nav className="woo-nav">{navigation("changes", "Changes", changeCount)}{navigation("history", "History")}</nav>
         <p className="woo-sidebar-label">References</p>{sidebar}
         <p className="woo-sidebar-label">Tools</p>
         <nav className="woo-nav">{navigation("branches", "Branches")}{navigation("tags", "Tags")}{navigation("stashes", "Stashes")}</nav>
         <nav className="woo-nav woo-nav-bottom">{navigation("merge", "Merge / Conflicts")}</nav>
-      </aside>}
+      </aside>
       <section className="workspace woo-workspace" data-view={activeView} data-detail-position={detailPosition} style={{ "--woo-master": masterSize } as CSSProperties}>{children}</section>
     </div>
-    <footer className="woo-statusbar"><span>{repository ? `${repository.branch ?? "Detached HEAD"} · ${changeCount} changes` : "Open a Git repository to begin"}</span><span>{busy ?? "Ready"}</span></footer>
+    <footer className="woo-statusbar"><span>{repository ? `${repository.branch ?? "Detached HEAD"} · ${changeCount} changes${tracking?.ahead != null && tracking.behind != null ? ` · ↑${tracking.ahead} ↓${tracking.behind}` : ""}` : "Open a Git repository to begin"}</span><span>{busy ?? "Ready"}</span></footer>
   </main>;
 }

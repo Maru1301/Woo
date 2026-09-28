@@ -200,6 +200,7 @@ async fn locations(git: &GitRunner, root: &Path) -> Result<Locations, AppError> 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoRefreshEvent {
+    pub repository_id: Option<String>,
     pub session_id: u64,
     pub sequence: u64,
     pub state: Option<RepositoryState>,
@@ -223,6 +224,7 @@ struct ActiveWatch {
     _watcher: RecommendedWatcher,
     task: JoinHandle<()>,
     request: mpsc::Sender<Hints>,
+    repository_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -237,12 +239,13 @@ impl RepositoryWatchManager {
         }
     }
 
-    pub async fn revalidate(&self) {
+    pub async fn revalidate(&self, repository_id: &str) {
         let request = self
             .active
             .lock()
             .await
             .as_ref()
+            .filter(|active| active.repository_id.as_deref() == Some(repository_id))
             .map(|active| active.request.clone());
         if let Some(request) = request {
             let _ = request
@@ -311,6 +314,8 @@ impl RepositoryWatchManager {
         }
         let app = app.clone();
         let session_id = info.session_id;
+        let repository_id = tree.repository_id();
+        let event_repository_id = repository_id.clone();
         let mut last_identity = (info.branch.clone(), info.head.clone());
         let task = tokio::spawn(async move {
             let mut sequence = 0;
@@ -345,6 +350,7 @@ impl RepositoryWatchManager {
                             last_identity = identity.clone();
                         }
                         let event = AutoRefreshEvent {
+                            repository_id: event_repository_id.clone(),
                             session_id,
                             sequence,
                             state: snapshot.state,
@@ -376,6 +382,7 @@ impl RepositoryWatchManager {
                         if !unavailable {
                             unavailable = true;
                             let event = AutoRefreshEvent {
+                                repository_id: event_repository_id.clone(),
                                 session_id,
                                 sequence,
                                 state: None,
@@ -402,6 +409,7 @@ impl RepositoryWatchManager {
             _watcher: watcher,
             task,
             request,
+            repository_id,
         });
         Ok(())
     }
@@ -510,6 +518,7 @@ mod tests {
     #[test]
     fn absent_identity_is_distinct_from_unborn_head() {
         let event = AutoRefreshEvent {
+            repository_id: Some("r1".into()),
             session_id: 1,
             sequence: 1,
             state: None,
@@ -527,6 +536,7 @@ mod tests {
             git_process_count: 0,
         };
         let absent = serde_json::to_value(&event).unwrap();
+        assert_eq!(absent["repositoryId"], "r1");
         assert!(absent.get("head").is_none());
         let unborn = serde_json::to_value(AutoRefreshEvent {
             head: Some(None),
